@@ -379,9 +379,10 @@ function updateConnectionUI() {
   populateVoiceChoices();
   $('#permission-note').textContent = s.permissions_mode === 'autonomous' ? 'Your request is approval. Available computer actions run automatically.' : s.permissions_mode === 'review' ? 'Computer actions wait for your review.' : 'Routine actions run automatically. Significant consequences ask first.';
 }
-async function saveSettings() {
+async function saveSettings(options = {}) {
   const body = {provider_url:$('#provider-url').value.trim(), model:$('#provider-model').value.trim(), roots:$('#access-roots').value.split('\n').map(v => v.trim()).filter(Boolean), name:$('#user-name').value.trim(), native_notifications:$('#native-notifications').checked, permissions_mode:$('#permissions-mode').value, computer_access:$('#computer-access').value, browser_mode:$('#browser-mode').value, speech_mode:$('#speech-mode').value, speech_voice:$('#speech-voice').value, background_voice:$('#background-voice').checked, workflow_timeout:Number($('#workflow-timeout').value), application_directories:$('#application-directories').value.split('\n').map(v => v.trim()).filter(Boolean)};
   if ($('#provider-key').value) body.api_key = $('#provider-key').value.trim();
+  if (options.model) body.model = options.model;
   if ($('#speech-key').value) body.speech_api_key = $('#speech-key').value.trim();
   state.settings = await patch('/settings', body); $('#provider-key').value = ''; updateConnectionUI(); populateSettings(); return state.settings;
 }
@@ -389,22 +390,23 @@ $('#settings-form').onsubmit = async event => { event.preventDefault(); try { aw
 $('#preset-openai').onclick = () => { $('#provider-url').value = 'https://api.openai.com/v1'; $('#provider-model').value = 'gpt-6.1-sol'; };
 $('#clear-api-key').onclick = async () => { try { state.settings = await patch('/settings', {api_key:''}); populateSettings(); updateConnectionUI(); toast(state.settings.has_api_key ? 'Saved key removed. An environment key is still available.' : 'Saved key removed.'); } catch(e) { errorToast(e); } };
 $('#preset-ollama').onclick = () => { $('#provider-url').value = 'http://localhost:11434/v1'; $('#provider-model').value = 'qwen3:8b'; toast('Start Ollama and run: ollama pull qwen3:8b'); };
-async function checkConnection(repair = false) {
-  $('#check-provider').disabled = $('#repair-provider').disabled = true;
-  $('#provider-result').textContent = repair ? 'Finding a model your provider accepts and checking its tools…' : 'Checking streaming, tools and the tool-result follow-up…';
+async function checkConnection(repair = false, sol = false) {
+  $('#check-provider').disabled = $('#repair-provider').disabled = $('#use-gpt-sol').disabled = true;
+  $('#provider-result').textContent = sol ? 'Checking GPT-6.1 Sol…' : repair ? 'Finding a model your provider accepts and checking its tools…' : 'Checking streaming, tools and the tool-result follow-up…';
   try {
-    await saveSettings();
-    const result = await post(repair ? '/provider/repair' : '/provider/check');
+    await saveSettings(sol ? {model:state.settings.model} : {});
+    const result = await post(sol ? '/provider/use-sol' : repair ? '/provider/repair' : '/provider/check');
     if(result.changed) { state.settings=await api('/settings'); populateSettings(); updateConnectionUI(); }
     $('#provider-result').textContent = result.message;
     $('#provider-pill').textContent = 'Connected'; $('#provider-pill').classList.add('connected');
   } catch(error) {
     $('#provider-result').textContent = error.message;
     $('#provider-pill').textContent = 'Connection failed'; $('#provider-pill').classList.remove('connected');
-  } finally { $('#check-provider').disabled = $('#repair-provider').disabled = false; }
+  } finally { $('#check-provider').disabled = $('#repair-provider').disabled = $('#use-gpt-sol').disabled = false; }
 }
 $('#check-provider').onclick = () => checkConnection();
 $('#repair-provider').onclick = () => checkConnection(true);
+$('#use-gpt-sol').onclick = () => checkConnection(false, true);
 $('#enable-notifications').onclick = async () => {
   if (!('Notification' in window)) { toast('This browser does not support desktop notifications.'); return; }
   const permission = await Notification.requestPermission(); toast(permission === 'granted' ? 'Browser reminders enabled.' : 'Reminders will still appear in your dashboard.');

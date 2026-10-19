@@ -105,3 +105,32 @@ def test_windows_drive_enumeration_does_not_probe_offline_filesystems(tmp_path, 
     def no_probe(*args): raise AssertionError('Drive listing must not access offline/network paths')
     monkeypatch.setattr(Path, 'exists', no_probe)
     assert computer.drives() == ['C:\\', 'D:\\', 'Z:\\']
+
+
+def test_old_spotify_receipts_do_not_dominate_a_new_outlook_request(tmp_path):
+    app = create_app(tmp_path/'private'); store = app.state.store
+    old = store.conversation()['id']
+    store.message(old, {'role':'assistant','content':'Spotify is now open for you, sir.'})
+    cid = store.conversation()['id']
+    store.message(cid, {'role':'user','content':'Open Spotify'})
+    store.message(cid, {'role':'assistant','content':'Spotify is now open for you, sir.'})
+    store.message(cid, {'role':'user','content':'Spotify is not open. Open Outlook instead.'})
+    store.create_item('memories', {'content':'My office is open on Monday and Tuesday.'})
+    messages = context(app, cid)
+    assert 'Spotify is now open for you, sir.' not in json.dumps(messages)
+    details = json.loads(messages[0]['content'].split('Current context (data):\n',1)[1])
+    assert details['current_request'] == 'Spotify is not open. Open Outlook instead.'
+    assert any(item['content']=='My office is open on Monday and Tuesday.' for item in details['memory']['memories'])
+    assert any(message.get('content')=='Spotify is not open. Open Outlook instead.' for message in messages)
+    assert any(message['content']=='Spotify is now open for you, sir.' for message in store.history(cid)), 'saved history stays intact'
+    store.db.close()
+
+
+def test_explicit_history_question_keeps_the_previous_receipt_available(tmp_path):
+    app = create_app(tmp_path/'private'); store = app.state.store
+    cid = store.conversation()['id']
+    store.message(cid, {'role':'user','content':'Open Spotify'})
+    store.message(cid, {'role':'assistant','content':'Spotify is now open for you, sir.'})
+    store.message(cid, {'role':'user','content':'What did you say about Spotify earlier?'})
+    assert any(message.get('content')=='Spotify is now open for you, sir.' for message in context(app,cid))
+    store.db.close()

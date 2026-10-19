@@ -119,7 +119,7 @@ class Store:
         score = " + ".join("CASE WHEN instr(lower(content), ?) > 0 THEN 1 ELSE 0 END" for _ in words) or "0"
         # Rank across the complete archive, not just the last few conversations.
         memories = self.rows(f"SELECT *, ({score}) AS relevance FROM memories ORDER BY relevance DESC, created_at DESC LIMIT 60", tuple(words))
-        hits = self.rows(f"""SELECT content,conversation_id,created_at,({score}) AS relevance FROM messages
+        hits = self.rows(f"""SELECT role,content,conversation_id,created_at,({score}) AS relevance FROM messages
                     WHERE role IN ('user','assistant') AND conversation_id != ? AND content != ''
                     ORDER BY relevance DESC, seq DESC LIMIT ?""", (*words, conversation_id or "", limit)) if words else []
         return {"memories": memories, "past_conversations": [{**i, "content": i["content"][:2000]} for i in hits if i['relevance'] > 0]}

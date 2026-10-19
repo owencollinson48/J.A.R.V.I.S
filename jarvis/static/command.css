@@ -6,3 +6,5 @@
 @media(prefers-reduced-motion:reduce){.sidebar{transition:none}}
 
 .flow-hub[data-status="failed"] small{white-space:normal;line-height:1.7;overflow-wrap:anywhere;color:#d7a1a8}#provider-result{font-size:11px;line-height:1.8;overflow-wrap:anywhere;margin:14px 0 0}#repair-provider{margin-left:8px}@media(max-width:700px){#repair-provider{margin:10px 0 0}}
+
+#use-gpt-sol{margin-right:8px}@media(max-width:700px){#use-gpt-sol{margin:0 0 10px}}

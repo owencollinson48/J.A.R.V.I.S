@@ -2,12 +2,19 @@
 import base64
 import json
 import platform
+import re
 from datetime import datetime
 
 
 VOLATILE_TOOLS = {'inspect_window', 'list_windows', 'desktop_screenshot', 'desktop_pointer',
                   'desktop_action', 'browser_action', 'search_applications'}
 MEMORY_TOOLS = {'remember', 'create_task', 'update_task', 'create_goal', 'set_reminder'}
+
+
+def transient_status(text):
+    """Old short execution receipts are not durable facts about the computer."""
+    if not isinstance(text, str) or len(text) > 500: return False
+    return bool(re.fullmatch(r"\s*(?:[^.!?\n]{1,100}?\s+(?:is|are|has been)\s+(?:(?:now|already|successfully)\s+)?(?:open|running|closed|launched|in the foreground)(?:\s+(?:for you|now|sir)|,\s*sir)*|I(?:'ve| have)?\s+(?:now\s+|just\s+)?(?:opened|launched|closed)\s+[^.!?\n]{1,100})[.!]?\s*", text, re.I))
 
 
 def compact_result(content):
@@ -36,6 +43,7 @@ def build_context(assistant, conversation_id, system, execution_modes):
     current_start = max((index for index, message in enumerate(history) if message['role'] == 'user'), default=0)
     latest = history[current_start].get('content', '') if history else ''
     if not isinstance(latest, str): latest = ''
+    historical_question = bool(re.search(r'\b(?:earlier|previously|last time|yesterday|history|what did (?:you|we)|what (?:you|we) said)\b', latest, re.I))
     active = assistant.contexts.get(conversation_id)
     snapshot = getattr(active, 'context_snapshot', None)
     if snapshot is None:
@@ -48,11 +56,16 @@ def build_context(assistant, conversation_id, system, execution_modes):
         # repeatedly sending sixty long memories on every tool continuation.
         memory = snapshot['memory']
         memory['memories'] = [{**item, 'content': item['content'][:1500]} for item in memory['memories'][:8]]
+        if not historical_question:
+            memory['past_conversations'] = [item for item in memory['past_conversations']
+                                            if item.get('role') != 'assistant' or not transient_status(item['content'])]
         memory['note'] = 'Relevant memory preview; use search_memory for full saved facts when needed. Past observations do not establish current computer state.'
         if active is not None: active.context_snapshot = snapshot
     full_access = settings.values.get('computer_access') == 'full'
     mode = settings.values['permissions_mode']
     details = {'local_time': datetime.now().astimezone().isoformat(), 'platform': platform.system(),
+               'current_request': latest,
+               'current_state_rule': 'Use fresh observations for this request. Old application status receipts and unrelated apps do not answer the current request. A user correction is not permission to repeat a stale claim.',
                'user_name': settings.values['name'], 'access_folders': settings.values['roots'],
                'permission_mode': mode, 'computer_access': 'full' if full_access else 'folders',
                'browser_mode': settings.values.get('browser_mode', 'existing'),
@@ -66,6 +79,9 @@ def build_context(assistant, conversation_id, system, execution_modes):
     retained = set(observations[-2:])
     image_ids, bounded = [], []
     for index, message in enumerate(history):
+        if (index < current_start and message['role'] == 'assistant' and not message.get('tool_calls')
+                and not historical_question and transient_status(message.get('content'))):
+            message = {**message, 'content': '[Earlier application status omitted. Observe the application requested now before reporting its current state.]'}
         if message['role'] == 'tool':
             if index > current_start:
                 try:

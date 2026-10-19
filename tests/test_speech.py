@@ -61,6 +61,31 @@ def test_third_party_chat_key_is_never_sent_to_speech(speech, monkeypatch):
     assert not any("secret" in str(value) for value in speech.public().values())
 
 
+@pytest.mark.parametrize("selected_voice", [None, "marin"])
+def test_professional_rp_delivery_preserves_short_confirmation_voice_and_key_isolation(speech, monkeypatch, selected_voice):
+    speech.settings.values.update(provider_url="https://another-provider.example/v1", speech_api_key="dedicated-speech-secret")
+    speech.settings.values.pop("speech_voice")
+    if selected_voice:
+        speech.settings.values["speech_voice"] = selected_voice
+    confirmation = "Outlook is now open for you, sir."
+    def handler(request):
+        assert request.headers["authorization"] == "Bearer dedicated-speech-secret"
+        assert str(request.url) == Speech.ENDPOINT
+        body = json.loads(request.content)
+        assert body["input"] == confirmation
+        assert body["voice"] == (selected_voice or "cedar")
+        assert body["speed"] == 1
+        instructions = body["instructions"]
+        for direction in ("southern British English", "Received Pronunciation (RP)", "British vowels", "non-rhotic", "crisp, precise consonants", "lower male register", "restrained warmth", "brisk and conversational", "without exaggeration or caricature", "Read only the supplied words"):
+            assert direction in instructions
+        for credential in ("dedicated-speech-secret", "chat-secret"):
+            assert credential not in request.content.decode()
+            assert credential not in json.dumps(speech.public())
+        return httpx.Response(200, content=b"ID3confirmation", headers={"content-type": "audio/mpeg"})
+    mock_service(monkeypatch, handler)
+    assert asyncio.run(speech.synthesize(confirmation)) == b"ID3confirmation"
+
+
 @pytest.mark.parametrize("status", [302, 401, 403, 429, 500])
 def test_service_errors_never_expose_key_input_or_provider_body(speech, monkeypatch, status):
     mock_service(monkeypatch, lambda request: httpx.Response(status, text="chat-secret PRIVATE SPOKEN CONTENT"))

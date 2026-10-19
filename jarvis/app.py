@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from .assistant import Assistant
 from .computer import Computer
 from .config import Settings
-from .connection import repair_connection
+from .connection import repair_connection, use_sol
 from .desktop import EmergencyHotkey
 from .execution import RunContext
 from .provider import Provider, ProviderError
@@ -175,6 +175,13 @@ def create_app(data_dir=None, provider_factory=Provider):
     async def repair_provider():
         try:
             return await repair_connection(settings,provider_factory,lambda:bool(assistant.active))
+        except ProviderError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @app.post('/api/provider/use-sol')
+    async def select_sol():
+        try:
+            return await use_sol(settings, provider_factory, lambda:bool(assistant.active))
         except ProviderError as exc:
             raise ValueError(str(exc)) from exc
 

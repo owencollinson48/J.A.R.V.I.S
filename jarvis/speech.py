@@ -19,10 +19,12 @@ class Speech:
     VOICES = {"cedar", "marin"}
     INSTRUCTIONS = (
         "Deliver the supplied words as an original professional British personal assistant. "
-        "Use a cultivated contemporary British English accent, precise diction and a softly resonant, composed voice. "
-        "Sound quietly confident, attentive and discreet, with restrained warmth. "
-        "Keep the delivery crisp and conversational: smooth connected phrasing, a purposeful pace and short natural pauses. "
-        "Avoid exaggerated drama, breathiness, sing-song intonation and robotic pauses. "
+        "Use a clearly cultivated southern British English Received Pronunciation (RP) accent: "
+        "distinctly British vowels, natural non-rhotic r pronunciation and crisp, precise consonants. "
+        "Use a composed, softly resonant lower male register, quietly confident, attentive and discreet, with restrained warmth. "
+        "Keep the delivery brisk and conversational: smooth connected phrasing, a purposeful pace and short natural pauses. "
+        "Make the accent unmistakably British without exaggeration or caricature. "
+        "Avoid exaggerated drama, breathiness, sing-song intonation, drawn-out syllables and robotic pauses. "
         "Read only the supplied words; do not add greetings, filler or commentary."
     )
 

@@ -22,16 +22,16 @@ async function installSpeech(page) {
 }
 async function installAPI(page, permissionsMode='autonomous', neural=false) {
  const messages=[], pending=[], prompts=[], decisions=[], speechRequests=[], providerRequests=[], delayedRefresh=[];let workflow=null,actions=[];
- const provider={check:{status:200,body:{ok:true,message:'Streaming, tools and tool-result follow-up accepted.'}},repair:{status:200,body:{ok:true,changed:false,message:'Current model supports the full workflow.'}},chatError:'',holdRefresh:false};
+ const provider={check:{status:200,body:{ok:true,message:'Streaming, tools and tool-result follow-up accepted.'}},repair:{status:200,body:{ok:true,changed:false,message:'Current model supports the full workflow.'}},useSol:{status:200,body:{ok:true,changed:true,model:'gpt-6.1-sol',message:'GPT-6.1 Sol is ready. Tool calling passed.'}},chatError:'',holdRefresh:false};
  const stamp=new Date().toISOString();
  const settings={provider_ready:true,provider_url:'http://localhost:11434/v1',model:'browser-test-fixture',roots:['/tmp'],name:'Owen',has_api_key:false,native_notifications:false,data_dir:'/tmp/voice-test',permissions_mode:permissionsMode,computer_access:'full',workflow_timeout:300,application_directories:[],speech_mode:'auto',speech_voice:'cedar',speech_available:neural,browser_mode:'existing',background_voice:true};
  await page.route('**/api/**',async route=>{
   const req=route.request(), path=new URL(req.url()).pathname.slice(4), method=req.method();
   let data;
   if(provider.holdRefresh&&method==='GET'&&['/tasks','/goals','/reminders','/memories','/conversations'].includes(path)){delayedRefresh.push(route);return;}
-  if(path==='/settings'||path==='/provider/check'||path==='/provider/repair')providerRequests.push({path,method,body:method==='PATCH'?req.postDataJSON():null,model:settings.model});
-  if(path==='/provider/check'||path==='/provider/repair'){
-   const result=path.endsWith('/repair')?provider.repair:provider.check;
+  if(path==='/settings'||path==='/provider/check'||path==='/provider/repair'||path==='/provider/use-sol')providerRequests.push({path,method,body:method==='PATCH'?req.postDataJSON():null,model:settings.model});
+  if(path==='/provider/check'||path==='/provider/repair'||path==='/provider/use-sol'){
+   const result=path.endsWith('/use-sol')?provider.useSol:path.endsWith('/repair')?provider.repair:provider.check;
    if(result.status===200&&result.body.changed)settings.model=result.body.model;
    await route.fulfill({status:result.status,json:result.body});return;
   }
@@ -229,6 +229,21 @@ const navigate=async(page,view)=>{await page.locator('#menu-button').click();awa
   assert.deepEqual(diagnosticAPI.providerRequests.map(request=>request.path),['/settings','/provider/check','/settings','/provider/repair','/settings']);
   assert.equal(diagnosticAPI.settings.permissions_mode,'autonomous');
   assert.equal(await diagnostics.locator('#repair-provider').isEnabled(),true);
+  // Explicit Sol selection keeps the prior saved model until the check passes.
+  diagnosticAPI.provider.useSol={status:400,body:{detail:'GPT-6.1 Sol is not available for this account.'}};
+  await diagnostics.locator('#provider-model').fill('unverified-draft-model');
+  await diagnostics.locator('#use-gpt-sol').click();
+  await diagnostics.waitForFunction(()=>document.querySelector('#provider-result').textContent.includes('not available for this account'));
+  assert.equal(diagnosticAPI.settings.model,repairedModel);
+  assert.equal(await diagnostics.locator('#provider-model').inputValue(),repairedModel);
+  assert.equal(await diagnostics.locator('#use-gpt-sol').isEnabled(),true);
+  diagnosticAPI.provider.useSol={status:200,body:{ok:true,changed:true,model:'gpt-6.1-sol',message:'GPT-6.1 Sol is ready. Tool calling passed.'}};
+  await diagnostics.locator('#use-gpt-sol').click();
+  await diagnostics.waitForFunction(()=>document.querySelector('#provider-result').textContent==='GPT-6.1 Sol is ready. Tool calling passed.');
+  assert.equal(diagnosticAPI.settings.model,'gpt-6.1-sol');
+  assert.equal(await diagnostics.locator('#provider-model').inputValue(),'gpt-6.1-sol');
+  assert.equal(diagnosticAPI.settings.provider_url,'http://localhost:11434/v1','model selection preserves the current provider');
+  assert.deepEqual(diagnosticAPI.providerRequests.slice(-5).map(request=>request.path),['/settings','/provider/use-sol','/settings','/provider/use-sol','/settings']);
   diagnosticAPI.provider.chatError=providerFailure;
   await navigate(diagnostics,'chat');await home(diagnostics);
   await diagnostics.locator('#jarvis-hud').click();await phase(diagnostics,'listening');
@@ -244,6 +259,6 @@ const navigate=async(page,view)=>{await page.locator('#menu-button').click();awa
   await diagnostics.reload();await diagnostics.waitForFunction(()=>document.querySelector('#flow-rail .flow-hub')?.dataset.status==='failed');
   await home(diagnostics);assert.equal(await diagnostics.locator('#flow-rail .flow-hub small').textContent(),providerFailure);
   assert.deepEqual(diagnosticErrors,[]);
-  console.log('Dashboard E2E passed: minimal circle/flow front page, hidden transcript during speech, transcript drawer without microphone interruption, front-page speech controls, autonomous requests without approval, optional routine approval pause/decline/resume, animated HUD, live connected graph on desktop/mobile, reduced motion, three spoken turns, UK voice selection, no self-echo, spoken stop, saved voice/rate, real blob audio playback and neural turn-taking, no auto-mic after reload, permission failure, exact connection diagnostics, compatible model repair, failed continuation remains visible in flow while home stays clean; reply playback before delayed sidebar refresh; no page errors.');
+  console.log('Dashboard E2E passed: minimal circle/flow front page, hidden transcript during speech, transcript drawer without microphone interruption, front-page speech controls, autonomous requests without approval, optional routine approval pause/decline/resume, animated HUD, live connected graph on desktop/mobile, reduced motion, three spoken turns, UK voice selection, no self-echo, spoken stop, saved voice/rate, real blob audio playback and neural turn-taking, no auto-mic after reload, permission failure, exact connection diagnostics, compatible model repair, failed continuation remains visible in flow while home stays clean; reply playback before delayed sidebar refresh, explicit Sol selection only after tool verification; no page errors.');
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -34,6 +34,9 @@ SHARED_HOSTS = {'chrome.exe','msedge.exe','firefox.exe','brave.exe','opera.exe',
                 'rundll32.exe','dllhost.exe','svchost.exe','cmd.exe','powershell.exe','pwsh.exe',
                 'wscript.exe','cscript.exe','mshta.exe','steam.exe','epicgameslauncher.exe',
                 'python.exe','pythonw.exe','java.exe','javaw.exe'}
+TRANSIENT_APPLICATION_FIELDS = {'score','aliases','last_used','matched_alias'}
+APPLICATION_TERMS = {'email':'outlook','emails':'outlook','my emails':'outlook','mail':'outlook',
+                     'music':'spotify','file explorer':'explorer','files':'explorer'}
 HOST_APPLICATIONS = {
     'chrome.exe':{'chrome','googlechrome'}, 'msedge.exe':{'edge','microsoftedge'},
     'firefox.exe':{'firefox','mozillafirefox'}, 'brave.exe':{'brave','bravebrowser'},
@@ -52,6 +55,11 @@ def compact(value):
 
 def executable_path(value):
     return ntpath.normpath(value).casefold() if value else ''
+
+
+def application_record(payload):
+    """Current aliases/scores are derived from this lookup, never old payloads."""
+    return {key:value for key,value in json.loads(payload).items() if key not in TRANSIENT_APPLICATION_FIELDS}
 
 
 START_APPS_SCRIPT = r'''
@@ -427,8 +435,37 @@ class ApplicationIndex:
         self.lock = threading.RLock()
         self.last_refresh = 0
         store.execute('CREATE TABLE IF NOT EXISTS applications(id TEXT PRIMARY KEY,name TEXT,payload TEXT,updated_at TEXT)')
-        store.execute('CREATE TABLE IF NOT EXISTS application_aliases(alias TEXT PRIMARY KEY,application_id TEXT)')
+        store.execute("CREATE TABLE IF NOT EXISTS application_aliases(alias TEXT PRIMARY KEY,application_id TEXT,source TEXT NOT NULL DEFAULT 'legacy')")
+        columns = {row['name'] for row in store.rows('PRAGMA table_info(application_aliases)')}
+        if 'source' not in columns:
+            store.execute("ALTER TABLE application_aliases ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'")
+        self._restore_explicit_alias_sources()
         store.execute('CREATE TABLE IF NOT EXISTS application_launches(id INTEGER PRIMARY KEY,application_id TEXT,method TEXT,verified INTEGER,created_at TEXT)')
+
+    def _restore_explicit_alias_sources(self):
+        # Old launch-generated aliases and explicit preferences shared one table.
+        # Promote only matching successful explicit tool records, not old claims.
+        if not self.store.row("SELECT alias FROM application_aliases WHERE source='legacy' LIMIT 1"):
+            return
+        for row in self.store.rows("SELECT arguments,result FROM action_log WHERE name='set_application_alias' AND status='completed' ORDER BY created_at DESC LIMIT 500"):
+            try:
+                args, result = json.loads(row['arguments']), json.loads(row['result'])
+                if not isinstance(args,dict) or not isinstance(result,dict) or result.get('error') or result.get('verified') is False:
+                    continue
+                value = normalized(result.get('alias') or args.get('alias',''))
+                app_id = result.get('application_id') or args.get('application_id')
+                self.store.execute("UPDATE application_aliases SET source='user' WHERE alias=? AND application_id=? AND source='legacy'",(value,app_id))
+            except (ValueError,TypeError,AttributeError): continue
+
+    @staticmethod
+    def alias_matches_application(alias, app):
+        if alias.get('source','legacy') == 'user': return True
+        value = APPLICATION_TERMS.get(alias['alias'],alias['alias'])
+        # A weak historical alias may shorten a real product name (Outlook ->
+        # Outlook new), but may not rename a different product (Spotify -> Chrome).
+        words = set(normalized(value).split()) - {'my','the','app','application','microsoft','windows'}
+        target = set(normalized(app['name']).split())
+        return bool(words and words <= target)
 
     def refresh(self, force=False):
         with self.lock:
@@ -476,30 +513,32 @@ class ApplicationIndex:
     def search(self, query='', refresh=False):
         if refresh or not self.count(): self.refresh(force=refresh)
         query = normalized(query)
-        alias = self.store.row('SELECT application_id FROM application_aliases WHERE alias=?', (query,))
+        alias = self.store.row('SELECT * FROM application_aliases WHERE alias=?', (query,))
         terms = set(query.split())
-        semantic = {'email':'outlook', 'emails':'outlook', 'my emails':'outlook', 'mail':'outlook', 'music':'spotify', 'file explorer':'explorer', 'files':'explorer'}
-        search = semantic.get(query, query)
+        search = APPLICATION_TERMS.get(query,query)
         terms = set(search.split())
         result = []
         launches = {row['application_id']:row['last_used'] for row in self.store.rows('SELECT application_id,max(created_at) AS last_used FROM application_launches WHERE verified=1 GROUP BY application_id')}
         aliases = {}
-        for row in self.store.rows('SELECT * FROM application_aliases'): aliases.setdefault(row['application_id'],[]).append(row['alias'])
+        for row in self.store.rows('SELECT * FROM application_aliases'): aliases.setdefault(row['application_id'],[]).append(row)
         for row in self.store.rows('SELECT payload FROM applications ORDER BY name'):
-            app = json.loads(row['payload'])
+            app = application_record(row['payload'])
             name = normalized(app['name'])
-            score = 2 if alias and alias['application_id'] == app['id'] else 1 if name == search else 0
+            matched_alias = alias if alias and alias['application_id']==app['id'] and self.alias_matches_application(alias,app) else None
+            score = 3 if name == query else 2 if matched_alias else 1 if name == search else 0
             if not score and search:
                 overlap = len(terms & set(name.split())) / max(1, len(terms))
                 score = max(overlap * .85, difflib.SequenceMatcher(None, search, name).ratio() * .7)
             if not query: score = 1
             if score >= .42:
-                result.append({**app, 'score': round(score, 3), 'last_used':launches.get(app['id'],''), 'aliases':aliases.get(app['id'],[])})
+                result.append({**app,'score':round(score,3),'last_used':launches.get(app['id'],''),
+                               'aliases':[item['alias'] for item in aliases.get(app['id'],[]) if self.alias_matches_application(item,app)],
+                               **({'matched_alias':{'alias':query,'source':matched_alias['source']}} if matched_alias else {})})
         return sorted(result, key=lambda app: (app['score'],app['last_used']), reverse=True)[:50]
 
     def resolve(self, name):
         exact = self.store.row('SELECT payload FROM applications WHERE id=?', (name,))
-        if exact: return json.loads(exact['payload'])
+        if exact: return application_record(exact['payload'])
         matches = self.search(name)
         if not matches and time.time() - self.last_refresh >= 900:
             self.refresh(force=True)
@@ -509,13 +548,16 @@ class ApplicationIndex:
             return {'ambiguous': True, 'matches': matches[:8]}
         return matches[0]
 
-    def alias(self, alias, application_id):
+    def alias(self, alias, application_id, source='user'):
         app = self.resolve(application_id)
         if app.get('ambiguous'): raise ValueError('Choose a specific indexed application')
+        if source not in {'user','launch'}: raise ValueError('Invalid application alias source')
         value = normalized(alias)
         if not value or len(value) > 120: raise ValueError('Use an alias of 1 to 120 characters')
-        self.store.execute('INSERT INTO application_aliases VALUES(?,?) ON CONFLICT(alias) DO UPDATE SET application_id=excluded.application_id', (value, app['id']))
-        return {'alias': value, 'application_id': app['id'], 'name': app['name']}
+        self.store.execute("INSERT INTO application_aliases(alias,application_id,source) VALUES(?,?,?) ON CONFLICT(alias) DO UPDATE SET application_id=excluded.application_id,source=excluded.source WHERE excluded.source='user' OR application_aliases.source!='user'",(value,app['id'],source))
+        saved = self.store.row('SELECT * FROM application_aliases WHERE alias=?',(value,))
+        return {'alias':value,'application_id':saved['application_id'],'source':saved['source'],
+                **({'name':app['name']} if saved['application_id']==app['id'] else {})}
 
     @staticmethod
     def match_evidence(app, window):
@@ -573,13 +615,14 @@ class ApplicationIndex:
             except OSError: focused = None
         return {'name':app['name'],'application_id':app['id'],'verified':bool(evidence),
                 'observed_running':bool(evidence),'window_id':window['id'],'window':window,
-                'focused':focused,'evidence':evidence}
+                'focused':focused,'evidence':evidence,
+                **({'matched_alias':app['matched_alias']} if app.get('matched_alias') else {})}
 
     def observe_launch(self, result):
         """Check a prior launch against current windows; never activate or refresh."""
         row = self.store.row('SELECT payload FROM applications WHERE id=?',(result.get('application_id'),))
         if not row: return {'verified':False,'observed_running':False,'focused':False}
-        app = json.loads(row['payload'])
+        app = application_record(row['payload'])
         previous_window = result.get('window')
         expected_pid = previous_window.get('pid') if isinstance(previous_window,dict) else None
         window = next((window for window in self.adapter.windows() if window['id']==result.get('window_id')
@@ -590,7 +633,7 @@ class ApplicationIndex:
     def observe_application(self, name):
         """Observe a cached, confidently resolved identity without discovery."""
         row = self.store.row('SELECT payload FROM applications WHERE id=?',(name,))
-        if row: app = json.loads(row['payload'])
+        if row: app = application_record(row['payload'])
         else:
             if not self.count(): return {'name':name,'verified':False,'observed_running':False,'focused':False}
             matches = self.search(name)
@@ -617,8 +660,8 @@ class ApplicationIndex:
         if verified:
             if launcher:
                 app['preferred'] = launcher
-                self.store.execute('UPDATE applications SET payload=? WHERE id=?',(json.dumps(app),app['id']))
-            if name != app['id']: self.alias(name,app['id'])
+                self.store.execute('UPDATE applications SET payload=? WHERE id=?',(json.dumps({key:value for key,value in app.items() if key not in TRANSIENT_APPLICATION_FIELDS}),app['id']))
+            if name != app['id']: self.alias(name,app['id'],source='launch')
         return {**result,'verified':verified,'focused':focused,'already_running':already_running,'method':method['kind'],
                 'message':('The requested application is visible and in front.' if verified else
                            'The application window was observed, but bringing it forward could not be verified. Inspect the current desktop before claiming success.' if current else

@@ -24,6 +24,25 @@ def candidate_models(identifiers, current):
     return selected
 
 
+async def use_sol(settings, provider_factory, busy=lambda:False):
+    """Select the explicitly requested model only after its tool check passes."""
+    if busy(): raise ProviderError('Finish or cancel the active task before changing models.')
+    snapshot = (settings.values['provider_url'], settings.values['model'], settings.api_key)
+    probe = copy.copy(settings)
+    probe.values = {**settings.values, 'api_key': snapshot[2], 'model': 'gpt-6.1-sol'}
+    try:
+        async with asyncio.timeout(45):
+            result = await provider_factory(probe).check()
+    except TimeoutError:
+        raise ProviderError('GPT-6.1 Sol did not finish its connection check. Your selected model was not changed.') from None
+    if busy(): raise ProviderError('A task started during the check. Your selected model was not changed.')
+    if snapshot != (settings.values['provider_url'], settings.values['model'], settings.api_key):
+        raise ProviderError('Connection settings changed during the check. Retry with the saved settings; no model was selected.')
+    settings.update({'model': 'gpt-6.1-sol'})
+    return {**result, 'ok': True, 'model': 'gpt-6.1-sol', 'previous_model': snapshot[1],
+            'changed': True, 'message': 'GPT-6.1 Sol is ready. Tool calling passed.'}
+
+
 async def repair_connection(settings, provider_factory, busy=lambda:False):
     if busy(): raise ProviderError('Finish or cancel the active task before checking another model.')
     snapshot = (settings.values['provider_url'],settings.values['model'],settings.api_key)

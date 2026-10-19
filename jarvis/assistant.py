@@ -28,7 +28,8 @@ Recover from concrete errors by refreshing the index, observing the UI, or choos
 Read documents before editing. Prefer edit_document to preserve Word tables, images and formatting; never rewrite a truncated read. Backups and undo ids are automatic. Do not hide material formatting loss.
 Use the current local time/timezone below; reminder dates require an explicit UTC offset. Ask if time is ambiguous. Reminders need JARVIS running.
 Search memory for past context; remember useful facts explicitly shared, not guesses or secrets. Use concise paragraphs/lists; no HTML. Report what completed, what could not be verified and any necessary next step.
-Before the final answer, compare the requested outcome with fresh tool observations. Old conversation claims, delivered input, and a requested activation do not prove the present result. Never announce completion in a tool-call narrative. Routine completion reports should use one or two sentences describing only verified outcomes and any remaining limitation.
+Before the final answer, compare the CURRENT requested outcome and application with fresh tool observations. A previous task about Spotify does not answer a new request about Outlook. Respect corrections such as "Spotify is not open" and check current state instead of repeating the old claim. Old conversation claims, delivered input, and requested activation do not prove the present result. Never announce completion in a tool-call narrative.
+Use one short, natural sentence for routine confirmations, for example "Outlook is now open for you, sir." Address the user as sir naturally. Describe the result, without narrating screenshots, tools, evaluation or internal steps. Discuss screen contents or technical evidence only when the user asks for them or a useful troubleshooting detail is necessary. Keep substantive answers and complex task results as detailed as the user's request requires.
 """
 
 EXECUTION_MODES = {
@@ -106,6 +107,52 @@ class Assistant:
         observed = result.get('observation') or {}
         return bool(result.get('image_id') or observed.get('image_id') or observed.get('elements') or observed.get('text'))
 
+    @staticmethod
+    def application_name(value):
+        return ' '.join(re.findall(r'[\w]+', str(value).casefold()))
+
+    def routine_application_targets(self, context, launches, latest):
+        """Identify a receipt for app-opening alone, not work inside the app."""
+        if any(item['name'] not in {'plan_workflow','search_applications','search_memory','list_windows',
+                                   'inspect_window','desktop_screenshot','launch_application','open_application'}
+               or item['arguments'].get('arguments') for item in latest.values()):
+            return None
+        command = re.fullmatch(r"\s*(?:jarvis[, ]+)?(?:(?:please|can you|could you|would you|will you|i want you to|i'd like you to)\s+)*(?:open|launch|start|bring up)\s+(.+?)\s*[.!?]*", context.request, re.I)
+        if not command: return None
+        target = command.group(1).strip().rstrip('.!?')
+        target = re.sub(r'(?:[\s,]+(?:thank you very much|thanks a lot|thank you|thanks|when you can|when you get a chance|when you have a moment|at your convenience|for me|please|now|sir))+\s*$', '', target, flags=re.I).strip()
+        # These requests require a substantive answer or more than launching.
+        if re.search(r'[.!?]\s+\w', target) or re.search(r'\b(?:then|read|write|edit|save|search|find|check|play|pause|send|draft|create|delete|move|summari[sz]e|explain|tell|show|describe|compare|calculate|remind|schedule|maximi[sz]e|fullscreen|foreground)\b', target, re.I):
+            return None
+        parts = re.split(r'\s+and\s+|\s*,\s*', target, flags=re.I)
+        if not parts or len(parts)>5: return None
+        known = self.store.rows('SELECT id,name FROM applications')
+        aliases = self.store.rows('SELECT * FROM application_aliases')
+        semantic = {'email':'outlook','emails':'outlook','my emails':'outlook','my email':'outlook',
+                    'mail':'outlook','music':'spotify','files':'explorer','file explorer':'explorer'}
+        targets = []
+        for part in parts:
+            part = re.sub(r'(?:\s+(?:for me|please|now|sir))+\s*$', '', part, flags=re.I).strip()
+            part = re.sub(r'^the\s+|\s+(?:app|application)$', '', part, flags=re.I).strip()
+            query = self.application_name(part)
+            if not query or len(query.split())>8: return None
+            canonical = {row['id'] for row in known if self.application_name(row['name'])==query}
+            explicit = {row['application_id'] for row in aliases if row.get('source')=='user' and self.application_name(row['alias'])==query}
+            wanted = semantic.get(query, query[3:] if query.startswith('my ') else query)
+            match = None
+            for item in reversed(launches):
+                result = item['result']; identity = result.get('application_id')
+                name = self.application_name(result.get('name') or item['arguments'].get('name'))
+                if canonical:
+                    same = identity in canonical
+                elif explicit:
+                    same = identity in explicit
+                else:
+                    same = set(wanted.split()).issubset(set(name.split()))
+                if same: match = item; break
+            targets.append((part, match))
+        return targets
+
     async def evaluate_response(self, context, message):
         """Ground computer status in this request's results without another model call."""
         latest = {}
@@ -113,6 +160,9 @@ class Assistant:
         issues = []
         content = message.get('content') or ''
         launches = [item for item in latest.values() if item['name'] in {'launch_application','open_application'}]
+        routine = self.routine_application_targets(context, launches, latest)
+        observed_launches = {}
+        launch_problems = {}
         for item in latest.values():
             name, args, result = item['name'], item['arguments'], item['result']
             if name in {'launch_application','open_application'} and not args.get('arguments'):
@@ -120,11 +170,18 @@ class Assistant:
                 observer = getattr(self.tools.applications, 'observe_launch', None)
                 observed = await asyncio.to_thread(observer, result) if observer and result.get('application_id') else result
                 context.check()
+                key = self.operation_key(item)
+                observed_launches[key] = observed
                 if not observed.get('verified'):
-                    issues.append(f"I couldn't verify that {app_name} opened.")
+                    text = f"{app_name} is no longer visible, sir." if result.get('verified') is True else f"I couldn't open {app_name}, sir."
+                    launch_problems[key] = text
+                    issues.append(text)
                 elif result.get('verified') is False and result.get('focused') is False and observed.get('focused') is not True:
-                    issues.append(f'{app_name} is running, but Windows did not allow me to bring it to the front.')
+                    text = f"{app_name} is running, but I couldn't bring it to the front, sir."
+                    launch_problems[key] = text
+                    issues.append(text)
                 else:
+                    if routine is not None: continue
                     clauses = [part for part in re.split(r'[.!?\n]', content) if str(app_name).casefold() in part.casefold()]
                     claim = ' '.join(clauses) if clauses else content if len(launches)==1 else ''
                     if re.search(r'\b(?:front|foreground|focused)\b', claim, re.I) and observed.get('focused') is not True:
@@ -138,6 +195,21 @@ class Assistant:
                   result.get('exit_code', 0) not in {0, None} or result.get('closed') is False):
                 action = args.get('action') or name.replace('_', ' ')
                 issues.append(f"I couldn't verify completion of {action}.")
+        if routine is not None and launches:
+            names = []
+            for target, item in routine:
+                if item is None:
+                    text = f"I couldn't open {target}, sir."
+                    return {**message, 'content':text}, 'failed', text
+                key = self.operation_key(item)
+                if key in launch_problems:
+                    text = launch_problems[key]
+                    return {**message, 'content':text}, 'failed', text
+                names.append(str(observed_launches[key].get('name') or item['result'].get('name') or target))
+            names = list(dict.fromkeys(names))
+            subject = names[0] if len(names)==1 else ', '.join(names[:-1]) + ' and ' + names[-1]
+            text = f'{subject} {"is" if len(names)==1 else "are"} now open for you, sir.'
+            return {**message, 'content':text}, 'completed', ''
         if issues:
             text = ' '.join(dict.fromkeys(issues[:3]))
             return {**message, 'content':text}, 'failed', text
@@ -146,26 +218,31 @@ class Assistant:
         # the model omitted the tool or recycled an old conversation's claim.
         # Creative/explanatory text is left alone unless actual tools ran.
         text_request = re.match(r'\s*(?:please\s+)?(?:write|draft|compose|translate|rephrase|explain|tell\s+(?:me\s+)?a\s+story)\b', context.request, re.I)
-        request_match = re.match(r"\s*(?:(?:please|can you|could you|would you|will you|i want you to|i'd like you to)\s+)*(?:open|launch|start|bring up)\s+(.+?)(?:[.!?]|$)", context.request, re.I)
+        request_match = re.match(r"\s*(?:jarvis[, ]+)?(?:(?:please|can you|could you|would you|will you|i want you to|i'd like you to)\s+)*(?:open|launch|start|bring up)\s+(.+?)(?:[.!?]|$)", context.request, re.I)
+        correction = re.search(r"(?:^|[.!?]\s*)(?:no[, ]+)?([\w &'’-]{1,60}?)\s+(?:is not|isn't|isnt|is still not|isn't actually)\s+(?:open|running|visible)\b", context.request, re.I)
         action_claim = re.search(r"\b(?:I(?:'ve| have)?\s+(?:successfully\s+)?(?:opened|launched|started)|opened|launched)\s+([^.!?\n]{1,80})", content, re.I)
         status_claim = re.search(r"(?:^|[.!?]\s+)([^.!?\n]{1,65}?)\s+(?:is|has been)\s+(?:(?:now|already|successfully)\s+)?(?:open|running|launched)\b", content, re.I)
         if not launches and not text_request and (action_claim or status_claim):
-            target = (request_match.group(1) if request_match else (action_claim or status_claim).group(1)).strip()
+            target = (routine[0][0] if routine and len(routine)==1 else request_match.group(1) if request_match else correction.group(1) if correction else (action_claim or status_claim).group(1)).strip()
             target = re.split(r'\s+(?:and|then|for me)\b', target, maxsplit=1, flags=re.I)[0].strip()
             observer = getattr(self.tools.applications, 'observe_application', None)
             if observer:
                 observed = await asyncio.to_thread(observer, target)
                 context.check()
                 other_work = any(item['name'] in {'open_file','browser_action'} for item in latest.values())
-                app_claim = bool(observed.get('application_id') or (request_match and not other_work))
+                app_claim = bool(observed.get('application_id') or ((request_match or correction) and not other_work))
                 if not observed.get('verified') and app_claim:
-                    text = f"I couldn't verify that {target} is open. No successful launch was recorded for this request."
+                    text = f"I can't verify that {target} is open, sir."
                     return {**message, 'content':text}, 'failed', text
                 if app_claim and observed.get('verified') and re.search(r'\b(?:front|foreground|focused|full.?screen|maximi[sz]ed)\b', content, re.I) and observed.get('focused') is not True:
                     text = f'{target} is running, but I could not verify that it was brought to the front.'
                     return {**message, 'content':text}, 'failed', text
-                if app_claim and observed.get('verified') and action_claim:
-                    return {**message, 'content':f'{observed.get("name") or target} is already open.'}, 'completed', ''
+                if app_claim and observed.get('verified') and correction:
+                    app_name = observed.get('name') or target
+                    text = f"{app_name} is running, but it isn't in front, sir." if observed.get('focused') is False else f'{app_name} has an open window, sir.'
+                    return {**message, 'content':text}, 'completed', ''
+                if app_claim and observed.get('verified') and (request_match or action_claim):
+                    return {**message, 'content':f'{observed.get("name") or target} is already open, sir.'}, 'completed', ''
         return message, 'completed', ''
 
     def tool_result(self, context, call_id, result):
