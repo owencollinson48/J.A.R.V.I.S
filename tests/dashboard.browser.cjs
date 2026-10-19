@@ -21,12 +21,19 @@ async function installSpeech(page) {
  });
 }
 async function installAPI(page, permissionsMode='autonomous', neural=false) {
- const messages=[], pending=[], prompts=[], decisions=[], speechRequests=[];let workflow=null,actions=[];
+ const messages=[], pending=[], prompts=[], decisions=[], speechRequests=[], providerRequests=[];let workflow=null,actions=[];
+ const provider={check:{status:200,body:{ok:true,message:'Streaming, tools and tool-result follow-up accepted.'}},repair:{status:200,body:{ok:true,changed:false,message:'Current model supports the full workflow.'}},chatError:''};
  const stamp=new Date().toISOString();
  const settings={provider_ready:true,provider_url:'http://localhost:11434/v1',model:'browser-test-fixture',roots:['/tmp'],name:'Owen',has_api_key:false,native_notifications:false,data_dir:'/tmp/voice-test',permissions_mode:permissionsMode,computer_access:'full',workflow_timeout:300,application_directories:[],speech_mode:'auto',speech_voice:'cedar',speech_available:neural,browser_mode:'existing',background_voice:true};
  await page.route('**/api/**',async route=>{
   const req=route.request(), path=new URL(req.url()).pathname.slice(4), method=req.method();
   let data;
+  if(path==='/settings'||path==='/provider/check'||path==='/provider/repair')providerRequests.push({path,method,body:method==='PATCH'?req.postDataJSON():null,model:settings.model});
+  if(path==='/provider/check'||path==='/provider/repair'){
+   const result=path.endsWith('/repair')?provider.repair:provider.check;
+   if(result.status===200&&result.body.changed)settings.model=result.body.model;
+   await route.fulfill({status:result.status,json:result.body});return;
+  }
   if(path==='/speech'){speechRequests.push(req.postDataJSON());await route.fulfill({contentType:'audio/wav',body:audioFixture()});return;}
   if(path==='/status') data={ok:true,settings,drives:[],active:[]};
   else if(path==='/settings'){if(method==='PATCH')Object.assign(settings,req.postDataJSON());data=settings;}
@@ -38,6 +45,10 @@ async function installAPI(page, permissionsMode='autonomous', neural=false) {
    workflow={id:'w'+prompts.length,status:'completed',request:content,plan:['Find the application','Open its window']};
    actions=[{id:'step1',workflow_id:workflow.id,name:'search_applications',status:'completed'},{id:'step2',workflow_id:workflow.id,name:'launch_application',status:'completed'}];
    const activity=[{type:'workflow',id:workflow.id,status:'running'},{type:'plan',outcome:content,steps:workflow.plan},...actions.flatMap(a=>[{type:'action',action:{...a,status:'running'}},{type:'tool',action_id:a.id,name:a.name,ok:true,status:'completed'}])];
+   if(provider.chatError){
+    workflow.status='failed';workflow.detail=provider.chatError;
+    await route.fulfill({contentType:'text/event-stream',body:[...activity,{type:'error',message:provider.chatError},{type:'done'}].map(e=>'data: '+JSON.stringify(e)+'\n\n').join('')});return;
+   }
    if(content==='Open Calculator'&&settings.permissions_mode!=='autonomous'){
     const approval={id:'a1',conversation_id:'c1',name:'open_application',arguments:{name:'calculator'},preview:{summary:'Open Calculator'}};
     pending.push(approval);workflow.status='awaiting_confirmation';actions[1].status='awaiting_confirmation';
@@ -55,7 +66,7 @@ async function installAPI(page, permissionsMode='autonomous', neural=false) {
   else data=[];
   await route.fulfill({json:data});
  });
- return {prompts,decisions,speechRequests};
+ return {prompts,decisions,speechRequests,settings,provider,providerRequests};
 }
 function audioFixture(){
  const rate=16000,seconds=2,samples=rate*seconds,buffer=Buffer.alloc(44+samples*2);
@@ -169,6 +180,55 @@ const navigate=async(page,view)=>{await page.locator('#menu-button').click();awa
   await natural.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'));});await phase(natural,'paused');
   await natural.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>false});document.dispatchEvent(new Event('visibilitychange'));});await phase(natural,'listening');
   await natural.locator('#front-voice-stop').click();await phase(natural,'off');assert.deepEqual(naturalErrors,[]);
-  console.log('Dashboard E2E passed: minimal circle/flow front page, hidden transcript during speech, transcript drawer without microphone interruption, front-page speech controls, autonomous requests without approval, optional routine approval pause/decline/resume, animated HUD, live connected graph on desktop/mobile, reduced motion, three spoken turns, UK voice selection, no self-echo, spoken stop, saved voice/rate, real blob audio playback and neural turn-taking, no auto-mic after reload, permission failure; no page errors.');
+
+  // Diagnose the actual provider error and repair only after a model passes the
+  // backend's checks. A failed continuation must remain visible in the task flow
+  // without opening the conversation drawer on the minimal home screen.
+  const diagnostics=await browser.newPage({viewport:{width:1440,height:1000}}),diagnosticErrors=[];
+  diagnostics.on('pageerror',error=>diagnosticErrors.push(error.message));
+  await installSpeech(diagnostics);const diagnosticAPI=await installAPI(diagnostics);
+  await diagnostics.goto(process.env.JARVIS_TEST_URL || 'http://127.0.0.1:8765');await diagnostics.waitForFunction(()=>document.querySelector('#model-status').textContent.includes('browser-test-fixture'));
+  await navigate(diagnostics,'settings');
+  const rejectedModel='unavailable-custom-model';
+  const providerFailure='Model provider returned HTTP 400 (param: model): The model unavailable-custom-model does not support tool calling.';
+  diagnosticAPI.provider.check={status:400,body:{detail:providerFailure}};
+  await diagnostics.locator('#provider-model').fill(rejectedModel);
+  await diagnostics.locator('#check-provider').click();
+  await diagnostics.waitForFunction(message=>document.querySelector('#provider-result').textContent===message,providerFailure);
+  assert.equal(await diagnostics.locator('#provider-pill').textContent(),'Connection failed');
+  assert.equal(await diagnostics.locator('#provider-model').inputValue(),rejectedModel,'a rejected connection must preserve the user selection for diagnosis');
+  assert.equal(await diagnostics.locator('#check-provider').isEnabled(),true);
+  assert.equal(await diagnostics.locator('#repair-provider').isEnabled(),true);
+  assert.equal(diagnosticAPI.settings.model,rejectedModel,'test connection must save the edited model before testing it');
+  assert.deepEqual(diagnosticAPI.providerRequests.slice(0,2).map(request=>request.path),['/settings','/provider/check']);
+  assert.equal(diagnosticAPI.providerRequests[1].model,rejectedModel);
+  const repairedModel='provider-listed-compatible-model';
+  const repairedMessage='Connected with provider-listed-compatible-model. Streaming, JARVIS tools and tool-result follow-up passed.';
+  diagnosticAPI.provider.repair={status:200,body:{ok:true,changed:true,model:repairedModel,message:repairedMessage}};
+  await diagnostics.locator('#repair-provider').click();
+  await diagnostics.waitForFunction(message=>document.querySelector('#provider-result').textContent===message,repairedMessage);
+  assert.equal(await diagnostics.locator('#provider-pill').textContent(),'Connected');
+  assert.equal(await diagnostics.locator('#provider-model').inputValue(),repairedModel);
+  assert.equal(diagnosticAPI.settings.model,repairedModel);
+  assert.match(await diagnostics.locator('#model-status').textContent(),/provider-listed-compatible-model/);
+  assert.deepEqual(diagnosticAPI.providerRequests.map(request=>request.path),['/settings','/provider/check','/settings','/provider/repair','/settings']);
+  assert.equal(diagnosticAPI.settings.permissions_mode,'autonomous');
+  assert.equal(await diagnostics.locator('#repair-provider').isEnabled(),true);
+  diagnosticAPI.provider.chatError=providerFailure;
+  await navigate(diagnostics,'chat');await home(diagnostics);
+  await diagnostics.locator('#jarvis-hud').click();await phase(diagnostics,'listening');
+  await words(diagnostics,'Open Notes and write my note');
+  await diagnostics.waitForFunction(()=>document.querySelector('#flow-rail .flow-hub')?.dataset.status==='failed');
+  await phase(diagnostics,'off');await home(diagnostics);
+  assert.equal(await diagnostics.locator('#flow-rail .flow-hub small').textContent(),providerFailure);
+  assert.equal(await diagnostics.locator('#flow-rail .flow-hub').getAttribute('title'),providerFailure,'full diagnostic must remain accessible when the node subtitle is truncated');
+  assert.equal(await diagnostics.locator('#flow-rail .flow-action[data-status="completed"]').count(),2,'completed launch remains recorded even though its model continuation failed');
+  assert.equal(await diagnostics.locator('.approval-card').count(),0);
+  assert.equal(await diagnostics.locator('#chat-error').isVisible(),false,'provider errors must not expose conversation text on the minimal home page');
+  await diagnostics.screenshot({path:'/tmp/jarvis-provider-failure.png',fullPage:true});
+  await diagnostics.reload();await diagnostics.waitForFunction(()=>document.querySelector('#flow-rail .flow-hub')?.dataset.status==='failed');
+  await home(diagnostics);assert.equal(await diagnostics.locator('#flow-rail .flow-hub small').textContent(),providerFailure);
+  assert.deepEqual(diagnosticErrors,[]);
+  console.log('Dashboard E2E passed: minimal circle/flow front page, hidden transcript during speech, transcript drawer without microphone interruption, front-page speech controls, autonomous requests without approval, optional routine approval pause/decline/resume, animated HUD, live connected graph on desktop/mobile, reduced motion, three spoken turns, UK voice selection, no self-echo, spoken stop, saved voice/rate, real blob audio playback and neural turn-taking, no auto-mic after reload, permission failure, exact connection diagnostics, compatible model repair, failed continuation remains visible in flow while home stays clean; no page errors.');
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

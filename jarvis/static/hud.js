@@ -88,9 +88,10 @@
     const lines=svgNode('svg',{'aria-hidden':'true',class:'flow-lines'});root.append(lines);
     const nodes=document.createElement('div');nodes.className='flow-nodes';root.append(nodes);
     const request=box(nodes,'YOUR REQUEST',workflow.request||'Current task','received','','flow-root');
-    const hub=box(nodes,'J.A.R.V.I.S.',statusText(workflow.status),workflow.status||'running','','flow-hub');
+    const hub=box(nodes,'J.A.R.V.I.S.',workflow.status==='failed' ? workflow.detail || 'Task failed. Check connection in Settings.' : statusText(workflow.status),workflow.status||'running','','flow-hub');
     let plan=workflow.plan||[];if(typeof plan==='string'){try{plan=JSON.parse(plan);}catch{plan=[];}}
     if(plan.length)hub.title=plan.join('\n');
+    if(workflow.status==='failed' && workflow.detail) hub.title=workflow.detail;
     const branches=document.createElement('div');branches.className='flow-branches';nodes.append(branches);
     const shown=actions.filter(action=>action.workflow_id===workflow.id||!action.workflow_id);
     const children=shown.map(action=>box(branches,statusText(action.name),statusText(action.status),action.status,action.id,'flow-action'));

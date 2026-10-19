@@ -379,10 +379,22 @@ $('#settings-form').onsubmit = async event => { event.preventDefault(); try { aw
 $('#preset-openai').onclick = () => { $('#provider-url').value = 'https://api.openai.com/v1'; $('#provider-model').value = 'gpt-6.1-sol'; };
 $('#clear-api-key').onclick = async () => { try { state.settings = await patch('/settings', {api_key:''}); populateSettings(); updateConnectionUI(); toast(state.settings.has_api_key ? 'Saved key removed. An environment key is still available.' : 'Saved key removed.'); } catch(e) { errorToast(e); } };
 $('#preset-ollama').onclick = () => { $('#provider-url').value = 'http://localhost:11434/v1'; $('#provider-model').value = 'qwen3:8b'; toast('Start Ollama and run: ollama pull qwen3:8b'); };
-$('#check-provider').onclick = async () => {
-  $('#check-provider').disabled = true; $('#provider-result').textContent = 'Saving and connecting…';
-  try { await saveSettings(); const result = await post('/provider/check'); $('#provider-result').textContent = result.message; $('#provider-pill').textContent = 'Connected'; } catch(e) { $('#provider-result').textContent = e.message; } finally { $('#check-provider').disabled = false; }
-};
+async function checkConnection(repair = false) {
+  $('#check-provider').disabled = $('#repair-provider').disabled = true;
+  $('#provider-result').textContent = repair ? 'Finding a model your provider accepts and checking its tools…' : 'Checking streaming, tools and the tool-result follow-up…';
+  try {
+    await saveSettings();
+    const result = await post(repair ? '/provider/repair' : '/provider/check');
+    if(result.changed) { state.settings=await api('/settings'); populateSettings(); updateConnectionUI(); }
+    $('#provider-result').textContent = result.message;
+    $('#provider-pill').textContent = 'Connected'; $('#provider-pill').classList.add('connected');
+  } catch(error) {
+    $('#provider-result').textContent = error.message;
+    $('#provider-pill').textContent = 'Connection failed'; $('#provider-pill').classList.remove('connected');
+  } finally { $('#check-provider').disabled = $('#repair-provider').disabled = false; }
+}
+$('#check-provider').onclick = () => checkConnection();
+$('#repair-provider').onclick = () => checkConnection(true);
 $('#enable-notifications').onclick = async () => {
   if (!('Notification' in window)) { toast('This browser does not support desktop notifications.'); return; }
   const permission = await Notification.requestPermission(); toast(permission === 'granted' ? 'Browser reminders enabled.' : 'Reminders will still appear in your dashboard.');
