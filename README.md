@@ -133,6 +133,8 @@ A missing model key affects chat, while the planner, file browser, and memory ed
 
 In **Settings → Intelligence**, run **Test connection**, then **Find compatible model** if needed. Discovery first checks the selected model, then tries up to three other suitable model IDs returned by your provider. It may take about 100 seconds. It never silently changes models during a task, replays computer actions, or saves a candidate that failed the check. Authentication and billing errors require fixing the provider account; if model listing is unavailable, select a tool-capable Chat Completions model supported by that provider manually. A listed model or an SDK model name alone does not prove tool support or account access.
 
+For OpenAI's `gpt-6.1-sol`, JARVIS sends `reasoning_effort: "none"` whenever function tools are included. This model's default reasoning mode rejects tools on `/v1/chat/completions`; the explicit setting follows the provider's compatibility guidance. It keeps the selected model and disables its separate reasoning mode for these requests. The same setting applies to connection checks and every tool-result follow-up. Other model IDs and other providers retain their existing request format. This fix does not retry failed requests or repeat earlier computer actions.
+
 Work continues if the dashboard connection drops until completion, cancellation, or a task limit; reload the conversation to see the saved outcome. Interrupted commands are not automatically rerun on restart.
 
 ### Validation and native Windows checks

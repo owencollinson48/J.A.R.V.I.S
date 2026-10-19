@@ -1,5 +1,6 @@
 import json
 import re
+from urllib.parse import urlparse
 
 import httpx
 
@@ -149,7 +150,8 @@ class Provider:
         safe_words = {'required', 'properties', 'additionalProperties', 'type', 'object', 'string',
                       'array', 'integer', 'number', 'boolean', 'null', 'function', 'tools',
                       'messages', 'content', 'tool_calls', 'tool_call_id', 'tool_choice',
-                      'stream', 'model', 'parameters', 'strict', *known_words}
+                      'stream', 'model', 'parameters', 'strict', 'reasoning_effort',
+                      'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', *known_words}
         def quoted(match):
             return match.group(0) if match.group(2) in safe_words else '[redacted]'
         value = re.sub(r"([\"`])(.{0,4096}?)\1|(?<!\w)(')([^']{0,4096})'", lambda match:
@@ -223,6 +225,12 @@ class Provider:
         # An empty tools list is rejected by some otherwise compatible servers.
         if tools:
             body['tools'] = tools
+            # This model's default reasoning mode rejects function tools on
+            # Chat Completions. Apply its compatible mode on every tool request,
+            # including checks and result continuations, before sending anything.
+            if (self.settings.values['model'] == 'gpt-6.1-sol'
+                    and urlparse(self.settings.values['provider_url']).hostname == 'api.openai.com'):
+                body['reasoning_effort'] = 'none'
         if tool_choice is not None:
             body['tool_choice'] = tool_choice
         text, calls, completed = "", {}, False
