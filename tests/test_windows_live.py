@@ -43,8 +43,12 @@ def test_installed_application_visible_launch(native_index,query,kind,tmp_path):
         print(app['name'],result)
         assert result['verified'], result
         assert result.get('window_id'), result
+        current = native_index.observe_launch(result,timeout=1,recover=True)
+        print('Current application window:',current)
+        assert current['verified'] and current['focused'], current
+        assert not current.get('minimized'), current
         desktop = DesktopControl(Images(tmp_path))
-        captured = desktop.screenshot(result['window_id'])
+        captured = desktop.screenshot(current['window_id'])
         print('Capture:', captured)
         assert captured['capture_method'] in {'window','visible_screen'}
         with Image.open(desktop.images.path(captured['image_id'])) as image:

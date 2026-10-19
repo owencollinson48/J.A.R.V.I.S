@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from jarvis.speech import Speech, SpeechError
+from jarvis.speech import Speech, SpeechError, speech_text
 
 HTTP_CLIENT = httpx.AsyncClient
 
@@ -44,6 +44,34 @@ def test_natural_voice_uses_fixed_official_endpoint_and_british_instructions(spe
     mock_service(monkeypatch, handler)
     assert asyncio.run(speech.synthesize("Good evening.", 0.95)) == b"ID3natural-speech"
     assert len(seen) == 1
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Your tasks:\n\n1. **Open Outlook**\n\n2) Read 3 messages\n\n3. Finish at 9:30",
+     "Your tasks: Open Outlook; Read 3 messages; Finish at 9:30."),
+    ("## Today\n\n- [ ] Take 1.5 mg at 9:30\n  with  200 ml water\n\n• Call `Task 2`\n+ Open [the report](https://example.com/report)\n\nThen\tfinish.&nbsp; Thank\u200Byou.",
+     "Today. Take 1.5 mg at 9:30 with 200 ml water; Call Task 2; Open the report; Then finish. Thankyou."),
+    ("Use C# and https://example.com/a_b#top; keep 2 * 3 = 6.",
+     "Use C# and https://example.com/a_b#top; keep 2 * 3 = 6."),
+    ("__Open__ https://example.com/a__b__c", "Open https://example.com/a__b__c"),
+])
+def test_spoken_lists_compact_visual_spacing_with_brief_pauses_and_preserve_content(speech, monkeypatch, text, expected):
+    assert speech_text(text) == expected
+    assert speech_text(expected) == expected
+    def handler(request):
+        body = json.loads(request.content)
+        assert body["input"] == expected
+        assert "brief conversational pause between items" in body["instructions"]
+        assert "whitespace as ordinary word spacing" in body["instructions"]
+        return httpx.Response(200, content=b"ID3compact-list", headers={"content-type": "audio/mpeg"})
+    mock_service(monkeypatch, handler)
+    assert asyncio.run(speech.synthesize(text)) == b"ID3compact-list"
+
+
+def test_formatting_only_speech_is_rejected_before_the_network(speech, monkeypatch):
+    mock_service(monkeypatch, lambda request: pytest.fail("Unexpected network request"))
+    with pytest.raises(SpeechError, match="spoken words"):
+        asyncio.run(speech.synthesize("\n\t&nbsp;\u200B\n---\n"))
 
 
 def test_third_party_chat_key_is_never_sent_to_speech(speech, monkeypatch):

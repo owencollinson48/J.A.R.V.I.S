@@ -296,6 +296,8 @@ class WindowsApplications:
         user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
         user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
         user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        class_name = getattr(user32,'GetClassNameW',None)
+        if class_name: class_name.argtypes = [wintypes.HWND,wintypes.LPWSTR,ctypes.c_int]
         result, processes = [], {}
         try:
             cloaking = ctypes.WinDLL('dwmapi',use_last_error=True).DwmGetWindowAttribute
@@ -327,6 +329,9 @@ class WindowsApplications:
             pid = wintypes.DWORD()
             user32.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
             item = {'id':int(hwnd),'title':title.value,**process_info(pid.value)}
+            if class_name:
+                name = ctypes.create_unicode_buffer(256)
+                if class_name(hwnd,name,len(name)): item['class_name'] = name.value
             if item['process'].casefold() == 'applicationframehost.exe':
                 children = {}
                 @callback_type
@@ -613,22 +618,114 @@ class ApplicationIndex:
         if foreground:
             try: focused = foreground()==window['id']
             except OSError: focused = None
+        state = {}
+        get_state = getattr(self.adapter,'window_state',None)
+        if get_state:
+            try:
+                current = get_state(window['id'])
+                state = {key:current[key] for key in ('minimized','maximized','fullscreen','bounds') if key in current}
+            except (OSError,ValueError): pass
         return {'name':app['name'],'application_id':app['id'],'verified':bool(evidence),
                 'observed_running':bool(evidence),'window_id':window['id'],'window':window,
-                'focused':focused,'evidence':evidence,
+                'focused':focused,'evidence':evidence,**state,
                 **({'matched_alias':app['matched_alias']} if app.get('matched_alias') else {})}
 
-    def observe_launch(self, result):
-        """Check a prior launch against current windows; never activate or refresh."""
+    @staticmethod
+    def _pause(cancel, seconds):
+        if cancel:
+            cancel.check()
+            cancel.event.wait(max(0,seconds))
+            cancel.check()
+        elif seconds>0: time.sleep(seconds)
+
+    def _current_window(self, app, windows, previous=None):
+        """Follow the application, never a stale title or a reused HWND."""
+        previous = previous or {}
+        candidates = [item for item in windows if self.matches(app,item)
+                      and not (item['id']==previous.get('id') and previous.get('pid') is not None
+                               and item.get('pid')!=previous['pid'])
+                      and 'splash' not in item.get('class_name','').casefold()]
+        if not candidates: return None
+        exact = next((item for item in candidates if item['id']==previous.get('id')),None)
+        if exact: return exact
+        foreground = getattr(self.adapter,'foreground_window',None)
+        if foreground:
+            try:
+                focused = foreground()
+                current = next((item for item in candidates if item['id']==focused),None)
+                if current: return current
+            except OSError: pass
+        return candidates[0]
+
+    def _focus_current(self, app, window, cancel, deadline, settle=False):
+        """Restore one verified app; follow a splash/main-window handover safely."""
+        previous = window
+        attempts = 0
+        while True:
+            if cancel: cancel.check()
+            if window is None:
+                window = self._current_window(app,self.adapter.windows(),previous)
+                if window is None:
+                    remaining = deadline-time.monotonic()
+                    if remaining<=0: return self._observed(app,None),False
+                    self._pause(cancel,min(.1,remaining))
+                    continue
+            attempts += 1
+            try: focused = bool(self.adapter.focus(window['id']))
+            except (OSError,ValueError): focused = False
+            if cancel: cancel.check()
+            current = self._current_window(app,self.adapter.windows(),window)
+            if current and current['id']==window['id'] and current.get('pid')==window.get('pid'):
+                observed = self._observed(app,current)
+                if observed['focused'] is not None: focused = focused and observed['focused']
+                focused = focused and not observed.get('minimized',False)
+                # Native apps may show a correctly named splash before replacing
+                # its HWND. One short settling observation avoids accepting it.
+                remaining = deadline-time.monotonic()
+                if focused and settle and remaining>0:
+                    self._pause(cancel,min(.12,remaining))
+                    stable = self._current_window(app,self.adapter.windows(),current)
+                    if not stable or stable['id']!=current['id'] or stable.get('pid')!=current.get('pid'):
+                        previous,window = current,stable
+                        if attempts<4 and time.monotonic()<deadline: continue
+                        return self._observed(app,stable),False
+                    observed = self._observed(app,stable)
+                    focused = observed['focused'] is not False and not observed.get('minimized',False)
+                return observed,focused
+            previous,window = window,current
+            if attempts>=4 or time.monotonic()>=deadline:
+                return self._observed(app,current),False
+
+    def observe_launch(self, result, cancel=None, timeout=.6, recover=False):
+        """Recheck a cached identity, optionally restoring the requested app.
+
+        The default is read-only. A new main-window HWND/PID may replace the
+        launch window, but the same HWND reused by another PID is never trusted.
+        No activation, discovery, elevation or installation is performed.
+        """
+        if cancel: cancel.check()
         row = self.store.row('SELECT payload FROM applications WHERE id=?',(result.get('application_id'),))
         if not row: return {'verified':False,'observed_running':False,'focused':False}
         app = application_record(row['payload'])
-        previous_window = result.get('window')
-        expected_pid = previous_window.get('pid') if isinstance(previous_window,dict) else None
-        window = next((window for window in self.adapter.windows() if window['id']==result.get('window_id')
-                       and (expected_pid is None or window.get('pid')==expected_pid)
-                       and self.matches(app,window)),None)
-        return self._observed(app,window)
+        previous = result.get('window')
+        previous = previous if isinstance(previous,dict) else {'id':result.get('window_id')}
+        deadline = time.monotonic()+max(0,min(float(timeout),2))
+        while True:
+            if cancel: cancel.check()
+            window = self._current_window(app,self.adapter.windows(),previous)
+            if window:
+                observed = self._observed(app,window)
+                if recover and (observed.get('minimized') or observed.get('focused') is not True):
+                    observed,focused = self._focus_current(app,window,cancel,deadline)
+                    observed['focused'] = focused
+                    observed.update(recovery_attempted=True,recovery_failed=not focused)
+                if observed.get('window_id') and observed['window_id']!=previous.get('id'):
+                    observed['window_replaced'] = True
+                if cancel: cancel.check()
+                return observed
+            remaining = deadline-time.monotonic()
+            if remaining<=0: return self._observed(app,None)
+            self._pause(cancel,min(.1,remaining))
 
     def observe_application(self, name):
         """Observe a cached, confidently resolved identity without discovery."""
@@ -640,20 +737,15 @@ class ApplicationIndex:
             if not matches or matches[0]['score']<.8 or (len(matches)>1 and abs(matches[0]['score']-matches[1]['score'])<.05):
                 return {'name':name,'verified':False,'observed_running':False,'focused':False}
             app = matches[0]
-        window = next((window for window in self.adapter.windows() if self.matches(app,window)),None)
+        window = self._current_window(app,self.adapter.windows())
         return self._observed(app,window)
 
-    def _focus_result(self, app, name, window, launcher, already_running, cancel=None):
+    def _focus_result(self, app, name, window, launcher, already_running, cancel=None, deadline=None):
         if cancel: cancel.check()
-        focused = bool(self.adapter.focus(window['id']))
+        result,focused = self._focus_current(app,window,cancel,deadline or time.monotonic(),
+                                            settle=callable(getattr(self.adapter,'window_state',None)))
         if cancel: cancel.check()
-        current = next((item for item in self.adapter.windows() if item['id']==window['id']
-                        and item.get('pid')==window.get('pid') and self.matches(app,item)),None)
-        if cancel: cancel.check()
-        result = self._observed(app,current)
-        if result['focused'] is not None: focused = focused and result['focused']
-        focused = focused and current is not None
-        verified = current is not None and focused
+        verified = result['observed_running'] and focused
         method = launcher or {'kind':'existing_window'}
         self.store.execute('INSERT INTO application_launches(application_id,method,verified,created_at) VALUES(?,?,?,?)',
                            (app['id'],json.dumps(method),int(verified),now()))
@@ -664,18 +756,18 @@ class ApplicationIndex:
             if name != app['id']: self.alias(name,app['id'],source='launch')
         return {**result,'verified':verified,'focused':focused,'already_running':already_running,'method':method['kind'],
                 'message':('The requested application is visible and in front.' if verified else
-                           'The application window was observed, but bringing it forward could not be verified. Inspect the current desktop before claiming success.' if current else
+                           'The application window was observed, but bringing it forward could not be verified. Inspect the current desktop before claiming success.' if result['observed_running'] else
                            'The application window disappeared or changed identity during verification. Do not claim it opened.')}
 
-    def launch(self, name, cancel=None, timeout=12):
+    def launch(self, name, cancel=None, timeout=20):
+        if cancel: cancel.check()
         if not self.adapter.supported: raise ValueError('Native application launching requires running JARVIS on Windows')
         app = self.resolve(name)
         if app.get('ambiguous'): return {**app,'verified':False,'message':'No single confident application identity was found. Inspect the indexed matches before choosing; do not substitute a different application.'}
-        initial = self.adapter.windows()
-        for window in initial:
-            if self.matches(app,window):
-                if cancel: cancel.check()
-                return self._focus_result(app,name,window,None,True,cancel)
+        initial = self._current_window(app,self.adapter.windows())
+        if initial:
+            if cancel: cancel.check()
+            return self._focus_result(app,name,initial,None,True,cancel,time.monotonic()+max(0,timeout))
         launchers = app['launchers'][:]
         if app.get('preferred') in launchers:
             launchers.remove(app['preferred']); launchers.insert(0,app['preferred'])
@@ -689,9 +781,9 @@ class ApplicationIndex:
             deadline = time.monotonic()+timeout
             while True:
                 if cancel: cancel.check()
-                for window in self.adapter.windows():
-                    if self.matches(app,window):
-                        return self._focus_result(app,name,window,launcher,False,cancel)
+                window = self._current_window(app,self.adapter.windows())
+                if window:
+                    return self._focus_result(app,name,window,launcher,False,cancel,deadline)
                 remaining = deadline-time.monotonic()
                 if remaining<=0: break
                 if cancel: cancel.event.wait(min(.2,remaining))

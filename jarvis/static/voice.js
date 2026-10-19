@@ -2,6 +2,8 @@
 (function (root) {
   'use strict';
 
+  const {speechText} = typeof module !== 'undefined' && module.exports ? require('./speech.js') : root.JarvisSpeech;
+
   function chooseVoice(voices, selected = '') {
     const explicit = voices.find(v => (v.voiceURI || v.name) === selected);
     if (explicit) return explicit;
@@ -12,13 +14,12 @@
   }
 
   function speechChunks(text) {
-    const plain = text.replace(/```[\s\S]*?```/g, 'The code is in our chat.')
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/[`*#]/g, '').replace(/\s+/g, ' ').trim();
+    const plain = speechText(text);
     const chunks = [];
     let remaining = plain;
     while (remaining.length > 220) {
       const limit = remaining.slice(0, 220);
-      const sentence = Math.max(limit.lastIndexOf('. '), limit.lastIndexOf('? '), limit.lastIndexOf('! '));
+      const sentence = Math.max(limit.lastIndexOf('. '), limit.lastIndexOf('? '), limit.lastIndexOf('! '), limit.lastIndexOf('; '));
       const boundary = sentence > 70 ? sentence + 1 : limit.lastIndexOf(' ') > 0 ? limit.lastIndexOf(' ') : 220;
       chunks.push(remaining.slice(0, boundary).trim());
       remaining = remaining.slice(boundary).trim();

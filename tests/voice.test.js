@@ -137,6 +137,31 @@ test('long speech is split without dropping words or reading code blocks aloud',
   assert.deepEqual(speechChunks('```python\nsecret = 123\n```'), ['The code is in our chat.']);
 });
 
+test('browser and natural playback receive the same compact list phrases without reopening the mic', async t => {
+  const text = 'Your tasks:\n\n1. Open Outlook\n\n2. Read 3 messages\n\n3. Finish at 9:30';
+  const expected = 'Your tasks: Open Outlook; Read 3 messages; Finish at 9:30.';
+  assert.deepEqual(speechChunks(text),[expected]);
+  const browser = fixture(); t.after(()=>browser.session.stop());
+  browser.session.start();
+  const spoken = browser.session.speak(text);
+  assert.equal(browser.spoken[0].text,expected);
+  assert.equal(browser.session.recognition,null);
+  assert.equal(browser.recognizers.length,1);
+  browser.spoken[0].onend(); await spoken; await wait(15);
+  assert.equal(browser.recognizers.length,2);
+
+  let finish;
+  const passages=[];
+  const natural = fixture({speechPlayer:{canUse:()=>true,cancel() {},play:(words)=>{passages.push(words);return new Promise(resolve=>{finish=resolve;});}}});
+  t.after(()=>natural.session.stop()); natural.session.start();
+  const played=natural.session.speak(text);
+  assert.deepEqual(passages,[expected]);
+  assert.equal(natural.session.recognition,null);
+  assert.equal(natural.spoken.length,0);
+  finish(); await played; await wait(15);
+  assert.equal(natural.recognizers.length,2);
+});
+
 test('skip reply resumes listening and ignores late speech events', async t => {
   const f = fixture(); t.after(() => f.session.stop()); f.session.start();
   const audio = f.session.speak('Something long.'); const utterance = f.spoken[0];

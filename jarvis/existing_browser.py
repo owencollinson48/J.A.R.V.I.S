@@ -9,6 +9,7 @@ import time
 from urllib.parse import urlparse
 
 from .applications import WindowsApplications
+from .execution import Cancelled
 
 BROWSERS = {'chrome.exe','msedge.exe','firefox.exe','brave.exe','opera.exe','vivaldi.exe','arc.exe','zen.exe','duckduckgo.exe'}
 
@@ -77,13 +78,38 @@ class ExistingBrowser:
     def __init__(self, desktop):
         self.desktop = desktop
         self.window_id = None
+        self.window_identity = None
+
+    @staticmethod
+    def identity(window):
+        return (window['id'],window.get('pid'),window.get('process','').lower())
+
+    def invalidate_elements(self, window_id):
+        # A new tab or replacement window must never inherit old page controls.
+        elements = getattr(self.desktop,'elements',None)
+        if isinstance(elements,dict):
+            for token in list(elements):
+                if elements[token].get('window_id')==window_id: elements.pop(token,None)
+
+    def remember(self, window):
+        identity = self.identity(window)
+        if self.window_identity and self.window_identity!=identity:
+            self.invalidate_elements(self.window_identity[0])
+        self.window_id, self.window_identity = window['id'],identity
 
     def choose_window(self, prefer_foreground=False):
         windows = [window for window in WindowsApplications.windows() if window.get('process','').lower() in BROWSERS]
         foreground = WindowsApplications.foreground_window()
         current = next((window for window in windows if window['id']==foreground),None)
-        remembered = next((window for window in windows if window['id']==self.window_id),None)
-        return (current or remembered if prefer_foreground else remembered or current) or next(iter(windows),None)
+        remembered = next((window for window in windows if window['id']==self.window_id and
+                           (not self.window_identity or self.identity(window)==self.window_identity)),None)
+        if prefer_foreground: return current or remembered or next(iter(windows),None)
+        if remembered: return remembered
+        # A browser may replace its top-level window during an update, redirect
+        # or sign-in. Recover reads in that browser before choosing another app.
+        family = self.window_identity[2] if self.window_identity else None
+        related = [window for window in windows if window.get('process','').lower()==family]
+        return next((window for window in related if window['id']==foreground),None) or next(iter(related),None) or current or next(iter(windows),None)
 
     def address(self, identity):
         try:
@@ -99,11 +125,23 @@ class ExistingBrowser:
         except Exception: pass
         return None
 
-    def inspect(self, cancel=None):
+    def inspect(self, cancel=None, window=None):
+        if cancel: cancel.check()
+        previous = self.window_id
+        if window is not None:
+            if not any(self.identity(item)==self.identity(window) for item in WindowsApplications.windows()):
+                raise ValueError('The browser window changed before it could be inspected.')
+        else: window = self.choose_window()
+        if not window: raise ValueError('No supported browser window is currently visible. Navigation input is not evidence that a page opened.')
+        self.remember(window)
         observed = self.desktop.inspect(self.window_id,cancel)
         accessibility = observed.get('accessibility',{'available':True})
         available = accessibility.get('available') is not False
-        return {'window':observed['window'],'url':self.address(self.window_id) if available else None,
+        address = self.address(self.window_id) if available else None
+        if cancel: cancel.check()
+        return {'window':observed['window'],'url':address,
+                'window_recovered':previous is not None and previous!=self.window_id,
+                'previous_window_id':previous if previous!=self.window_id else None,
                 'title':observed['window']['title'],
                 'text':'\n'.join(item['name'] for item in observed['elements'] if item.get('name'))[:20000],
                 'elements':[{**item,'role':item.get('type','control')} for item in observed['elements']],
@@ -122,11 +160,42 @@ class ExistingBrowser:
         window = self.choose_window(prefer_foreground=action=='navigate')
         if action in {'navigate','read','back','screenshot'}:
             return {'target_name':action,'mode':'existing','window_id':window['id'] if window else None,
-                    'signature':hashlib.sha256(json.dumps([action,args.get('url'),window['id'] if window else None]).encode()).hexdigest()}
+                    'window_identity':self.identity(window) if window else None,
+                    'signature':hashlib.sha256(json.dumps([action,args.get('url'),self.identity(window) if window else None]).encode()).hexdigest()}
         if not window: raise ValueError('No open browser was found. Navigate to a website first.')
-        self.window_id = window['id']
+        self.remember(window)
         native = {**args,'window_id':self.window_id,'action':'set_text' if action=='fill' else action}
         return {**self.desktop.preflight(native),'mode':'existing','window_id':self.window_id}
+
+    @staticmethod
+    def url_matches(actual, target):
+        if not actual: return False
+        try:
+            parsed = urlparse(actual)
+            def port(value): return value.port or (443 if value.scheme=='https' else 80)
+            return (parsed.scheme,parsed.hostname,port(parsed),parsed.path.rstrip('/'),parsed.query,parsed.fragment)==(
+                target.scheme,target.hostname,port(target),target.path.rstrip('/'),target.query,target.fragment)
+        except ValueError: return False
+
+    def navigation_window(self, original, before):
+        windows = [window for window in WindowsApplications.windows() if window.get('process','').lower() in BROWSERS]
+        foreground = WindowsApplications.foreground_window()
+        family = original.get('process','').lower() if original else None
+        related = [window for window in windows if not family or window.get('process','').lower()==family]
+        current = next((window for window in related if window['id']==foreground),None)
+        # Only follow a newly created foreground window in the same browser;
+        # never silently observe another unrelated existing browser after input.
+        if current and self.identity(current) not in before: return current
+        remembered = next((window for window in related if original and self.identity(window)==self.identity(original)),None)
+        return remembered or current or next(iter(related),None)
+
+    def post_observation(self, cancel=None, window=None):
+        try: return {'observation':self.inspect(cancel,window)}
+        except Cancelled: raise
+        except Exception as exc:
+            return {'observation_error':f'{type(exc).__name__}: {str(exc)[:600]}',
+                    'verified':False,
+                    'note':'The input was delivered, but its result could not be observed. Re-inspect the current browser or capture its window; do not repeat the input or claim completion from this result.'}
 
     @staticmethod
     def keys(*keys):
@@ -146,10 +215,14 @@ class ExistingBrowser:
         action = args['action']
         if action=='navigate':
             target = valid_url(args.get('url',''))
-            window = next((item for item in WindowsApplications.windows() if item['id']==preview.get('window_id') and item.get('process','').lower() in BROWSERS),None)
+            initial_windows = [item for item in WindowsApplications.windows() if item.get('process','').lower() in BROWSERS]
+            before = {self.identity(item) for item in initial_windows}
+            window = next((item for item in initial_windows if item['id']==preview.get('window_id')),None)
             if preview.get('window_id') and not window: raise ValueError('Selected browser closed. Inspect and try again.')
+            if window and preview.get('window_identity') and self.identity(window)!=tuple(preview['window_identity']):
+                raise ValueError('Selected browser window changed identity. Inspect again before navigating.')
             if window:
-                self.window_id = window['id']
+                self.remember(window)
                 self.desktop.ensure_focus(self.window_id)
                 if cancel: cancel.check()
                 self.keys('ctrl','t') # Preserve the current tab, including the JARVIS dashboard.
@@ -158,6 +231,7 @@ class ExistingBrowser:
                 self.type_url(args['url'],cancel,self.window_id)
                 if cancel: cancel.check()
                 self.keys('enter')
+                self.invalidate_elements(self.window_id)
             else:
                 import webbrowser
                 if not webbrowser.open(args['url'],new=2): raise ValueError('Windows could not open the default browser')
@@ -168,40 +242,81 @@ class ExistingBrowser:
                     if window: break
                     time.sleep(.1)
                 if not window: return {'performed':'navigate','verified':False,'mode':'existing','requested_url':args['url'],'message':'The URL was sent to the default browser but no supported browser window was observed.'}
-                self.window_id=window['id']
+                self.remember(window)
                 WindowsApplications.focus(self.window_id)
-            deadline=time.monotonic()+4
+            original = window
+            deadline=time.monotonic()+6
             actual=None
             observed=None
+            observation_error=None
             while time.monotonic()<deadline:
                 if cancel: cancel.check()
-                actual=self.address(self.window_id)
-                if actual:
-                    parsed=urlparse(actual)
-                    if parsed.hostname==target.hostname and parsed.path.rstrip('/')==target.path.rstrip('/') and parsed.query==target.query and parsed.fragment==target.fragment: break
-                if not actual and observed is None:
-                    observed = self.inspect(cancel)
-                    if observed.get('accessibility',{}).get('available') is False: break
+                candidate = self.navigation_window(original,before)
+                if candidate:
+                    changed = self.window_identity!=self.identity(candidate)
+                    self.remember(candidate)
+                    try:
+                        if observed is None or changed:
+                            observed = self.inspect(cancel,candidate)
+                            actual = observed.get('url')
+                            if observed.get('accessibility',{}).get('available') is False: break
+                        else: actual=self.address(self.window_id)
+                    except Cancelled: raise
+                    except Exception as exc:
+                        observation_error=f'{type(exc).__name__}: {str(exc)[:600]}'
+                        # The window may have been replaced between enumeration
+                        # and inspection. Retry observation only, never navigation.
+                        observed=None
+                        actual=None
+                    if self.url_matches(actual,target): break
                 time.sleep(.15)
-            actual_parsed=urlparse(actual or '')
-            verified=bool(actual and actual_parsed.hostname==target.hostname and actual_parsed.path.rstrip('/')==target.path.rstrip('/') and actual_parsed.query==target.query and actual_parsed.fragment==target.fragment)
+            candidate = self.navigation_window(original,before)
+            if candidate:
+                self.remember(candidate)
+                if not (observed and observed.get('window',{}).get('id')==candidate['id'] and
+                        observed.get('accessibility',{}).get('available') is False):
+                    fresh = self.post_observation(cancel,candidate)
+                    observed = fresh.get('observation')
+                    observation_error = fresh.get('observation_error')
+                actual = observed.get('url') if observed else None
+            else:
+                observed=None
+                actual=None
+                observation_error='No window in the selected browser is currently visible.'
+            verified=bool(observed and self.url_matches(actual,target))
+            status='verified' if verified else 'redirected' if actual else 'unverified'
             return {'performed':'navigate','mode':'existing','window_id':self.window_id,'requested_url':args['url'],
-                    'verified':verified,'observation':observed if observed and observed.get('accessibility',{}).get('available') is False else self.inspect(cancel),
-                    'message':'Requested site observed in the existing browser.' if verified else 'Navigation input delivered. URL could not be matched (it may have redirected or accessibility is unavailable); inspect the returned UI or screenshot before claiming success.'}
+                    'actual_url':actual,'navigation_status':status,'redirected':bool(actual and not verified),
+                    'verified':verified,'observation':observed,'observation_error':observation_error,
+                    'recovered_from_window_id':original['id'] if original and self.window_id!=original['id'] else None,
+                    'message':'Requested site observed in the existing browser.' if verified else
+                              'Navigation input delivered. A different URL is visible; inspect the returned page before deciding whether the requested work completed.' if actual else
+                              'Navigation input delivered. The requested page could not be verified; inspect the returned UI or screenshot before claiming success. Do not repeat navigation just because observation was unavailable.'}
         window = self.choose_window()
         if not window: raise ValueError('No open browser found. Open a website first.')
-        self.window_id=window['id']
-        if preview.get('window_id')!=self.window_id: raise ValueError('Browser window changed; inspect again')
-        if action=='read': return {'performed':'read','mode':'existing','window_id':self.window_id,'observation':self.inspect(cancel)}
+        previous = self.window_id
+        self.remember(window)
+        if action not in {'read','screenshot'} and preview.get('window_id')!=self.window_id: raise ValueError('Browser window changed; inspect again')
+        if action=='read':
+            observation=self.inspect(cancel)
+            if preview.get('window_id')!=self.window_id:
+                observation.update(window_recovered=True,previous_window_id=preview.get('window_id',previous))
+            return {'performed':'read','mode':'existing','window_id':self.window_id,'observation':observation}
         if action=='screenshot': return {**self.desktop.screenshot(self.window_id,cancel),'mode':'existing'}
+        before = {self.identity(item) for item in WindowsApplications.windows()}
         if action=='back':
+            if preview.get('window_identity') and self.window_identity!=tuple(preview['window_identity']):
+                raise ValueError('Browser window changed identity; inspect again')
             self.desktop.ensure_focus(self.window_id)
             if cancel: cancel.check()
             self.keys('alt','left')
+            self.invalidate_elements(self.window_id)
         else:
             native={**args,'window_id':self.window_id,'action':'set_text' if action=='fill' else action}
             if action=='press_keys': native['keys']=args.get('keys','Enter').lower().replace('control+','ctrl+')
             result=self.desktop.act(native,preview,cancel)
-            return {**result,'mode':'existing','observation':self.inspect(cancel)}
+            candidate = self.navigation_window(window,before) or window
+            return {**result,'mode':'existing',**self.post_observation(cancel,candidate)}
         if cancel: cancel.check()
-        return {'performed':action,'mode':'existing','window_id':self.window_id,'observation':self.inspect(cancel)}
+        candidate = self.navigation_window(window,before) or window
+        return {'performed':action,'mode':'existing','window_id':window['id'],**self.post_observation(cancel,candidate)}

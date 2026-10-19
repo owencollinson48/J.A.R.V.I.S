@@ -45,7 +45,8 @@ def env(tmp_path):
     def activate(name,context):
         control.launches.append(name)
         return control.results.pop(0)
-    def observe_launch(result):
+    def observe_launch(result,cancel=None,recover=False):
+        if cancel: cancel.check()
         control.observations.append(('launch',result['name']))
         return control.states[result['name']]
     def observe_application(name):
@@ -130,6 +131,18 @@ def test_initial_foreground_denial_is_reported_unless_fresh_focus_recovers(env,c
     assert env.control.launches==['Spotify']
 
 
+@pytest.mark.parametrize('minimized',[False,True])
+def test_fresh_restore_or_focus_failure_overrides_an_earlier_verified_launch(env,minimized):
+    env.control.results=[launch()]
+    env.control.states['Spotify']={**observation(focused=False),'minimized':minimized,
+                                   'recovery_attempted':True,'recovery_failed':True}
+    _,events=chat(env,[reply(None,('launch_application',{'name':'Spotify'})),reply('Spotify is now open.')])
+    assert final_text(events)==("Spotify is running, but I couldn't restore its window, sir." if minimized else
+                               "Spotify is running, but I couldn't bring it to the front, sir.")
+    assert env.get('/api/activity').json()['workflows'][0]['status']=='failed'
+    assert env.control.launches==['Spotify']
+
+
 def test_opening_two_apps_does_not_require_both_to_remain_foreground(env):
     env.control.results=[launch(),launch('Outlook')]
     env.control.states.update(Spotify=observation(focused=False),Outlook=observation('Outlook',focused=True))
@@ -196,6 +209,116 @@ def test_native_input_with_fresh_visual_observation_allows_model_evaluation(env)
     text='Your search text is visible in the browser.'
     _,events=chat(env,[reply(None,('desktop_action',{'action':'type_text','window_id':11,'text':'Requested search'})),reply(text)],text='Type my search in the browser')
     assert final_text(events)==text
+
+
+@pytest.mark.parametrize('observed_window,observed_pid,verified',[(11,100,True),(12,100,False),(11,200,False)])
+def test_later_inspection_verifies_delivered_input_only_in_the_same_window(env,observed_window,observed_pid,verified):
+    class Desktop:
+        def preflight(self,args): return {'signature':'observed','target_name':'Browser','unknown_target':True}
+        def act(self,*args): return {'performed':'type_text','window_id':11,'verified':False,
+                                   'observation':{'window':{'id':11,'pid':100},'elements':[]},
+                                   'observation_error':'The app was still updating.'}
+        def inspect(self,identity,cancel=None):
+            return {'window':{'id':identity,'pid':observed_pid},'elements':[{'id':'new-field','text':'Requested search'}]}
+    env.jarvis.state.tools.desktop=Desktop()
+    text='Your search text is visible in the browser, sir.'
+    _,events=chat(env,[reply(None,('desktop_action',{'action':'type_text','window_id':11,'text':'Requested search'})),
+        reply(None,('inspect_window',{'window_id':observed_window})),reply(text)],text='Type my search in the browser')
+    assert (final_text(events)==text)==verified
+    assert env.get('/api/activity').json()['workflows'][0]['status']==('completed' if verified else 'failed')
+
+
+def test_failed_accessibility_inspection_can_be_recovered_by_a_later_screenshot(env):
+    from PIL import Image
+    image=env.jarvis.state.tools.images.save(Image.new('RGB',(80,80),'navy'))
+    class Desktop:
+        def inspect(self,*args): raise OSError('Accessibility provider is unavailable')
+        def screenshot(self,identity,cancel=None): return {**image,'window_id':identity}
+    env.jarvis.state.tools.desktop=Desktop()
+    text='The browser is ready for your next step, sir.'
+    _,events=chat(env,[reply(None,('inspect_window',{'window_id':11})),
+        reply(None,('desktop_screenshot',{'window_id':11})),reply(text)],text='Check the current browser window')
+    assert final_text(events)==text
+    assert env.get('/api/activity').json()['workflows'][0]['status']=='completed'
+    assert any(isinstance(message.get('content'),list) for message in env.jarvis.state.assistant.provider.seen[-1])
+
+
+def test_requested_close_does_not_reopen_or_fail_a_previously_launched_app(env):
+    class Desktop:
+        def preflight(self,args): return {'signature':'observed','target_name':'Spotify'}
+        def act(self,*args): return {'closed':True,'window_id':11}
+    env.jarvis.state.tools.desktop=Desktop()
+    env.control.results=[launch()];env.control.states['Spotify']=observation(verified=False)
+    text='Spotify is closed, sir.'
+    _,events=chat(env,[reply(None,('launch_application',{'name':'Spotify'})),
+        reply(None,('desktop_action',{'action':'close','window_id':11})),reply(text)],text='Open Spotify, then close it')
+    assert final_text(events)==text
+    assert env.control.observations==[] and env.control.launches==['Spotify']
+    assert env.get('/api/activity').json()['workflows'][0]['status']=='completed'
+
+
+def test_requested_minimization_does_not_get_reported_as_a_restore_failure(env):
+    class Desktop:
+        def preflight(self,args): return {'signature':'observed','target_name':'Spotify'}
+        def act(self,*args): return {'performed':'minimize','verified':True,'window_id':11,'minimized':True}
+    env.jarvis.state.tools.desktop=Desktop()
+    env.control.results=[launch()]
+    env.control.states['Spotify']={**observation(focused=False),'minimized':True}
+    text='Spotify is minimized, sir.'
+    _,events=chat(env,[reply(None,('launch_application',{'name':'Spotify'})),
+        reply(None,('desktop_action',{'action':'minimize','window_id':11})),reply(text)],text='Open Spotify, then minimize it')
+    assert final_text(events)==text
+    assert env.get('/api/activity').json()['workflows'][0]['status']=='completed'
+
+
+def test_a_screenshot_alone_does_not_clear_a_failed_foreground_action(env):
+    from PIL import Image
+    image=env.jarvis.state.tools.images.save(Image.new('RGB',(80,80),'navy'))
+    class Desktop:
+        def preflight(self,args): return {'signature':'observed','target_name':'Browser'}
+        def act(self,*args): return {'performed':'focus','verified':False,'window_id':11,'focused':False}
+        def screenshot(self,identity,cancel=None): return {**image,'window_id':identity}
+    env.jarvis.state.tools.desktop=Desktop()
+    _,events=chat(env,[reply(None,('desktop_action',{'action':'focus','window_id':11})),
+        reply(None,('desktop_screenshot',{'window_id':11})),reply('The app is in front, sir.')],text='Bring the app to the front')
+    assert 'couldn\'t verify' in final_text(events)
+    assert env.get('/api/activity').json()['workflows'][0]['status']=='failed'
+
+
+def test_measured_windows_blocker_is_returned_instead_of_generic_guesses(env,monkeypatch):
+    calls=[]
+    def diagnose(window_id=None):
+        calls.append(window_id)
+        return {'supported':True,'blockers':[{'code':'window_not_responding',
+            'detail':'Windows reports that this window is not responding.',
+            'recovery':'Wait briefly and observe again.'}]}
+    monkeypatch.setattr('jarvis.windows_health.desktop_diagnostics',diagnose)
+    class Desktop:
+        def preflight(self,args): raise OSError('The window did not respond')
+    env.jarvis.state.tools.desktop=Desktop()
+    _,events=chat(env,[reply(None,('desktop_action',{'action':'press_keys','window_id':11,'keys':'ctrl+f'})),
+        reply('Everything is completed.')],text='Open Find in this window')
+    assert calls==[11]
+    assert 'not responding' in final_text(events) and 'Everything is completed' not in final_text(events)
+    assert 'administrator' not in final_text(events)
+    action=env.get('/api/activity').json()['actions'][0]
+    assert action['result']['diagnostics']['blockers'][0]['code']=='window_not_responding'
+
+
+def test_windows_diagnostic_failure_preserves_delivered_input_and_is_not_retried(env,monkeypatch):
+    inputs=[]
+    def unavailable(window_id=None): raise RuntimeError('Optional diagnostic unavailable')
+    monkeypatch.setattr('jarvis.windows_health.desktop_diagnostics',unavailable)
+    class Desktop:
+        def preflight(self,args): return {'signature':'observed','target_name':'Browser','unknown_target':True}
+        def act(self,*args):
+            inputs.append('typed')
+            return {'performed':'type_text','window_id':11,'verified':False,'observation_error':'Paint pending'}
+    env.jarvis.state.tools.desktop=Desktop()
+    _,events=chat(env,[reply(None,('desktop_action',{'action':'type_text','window_id':11,'text':'Search'})),reply('Done.')],text='Type Search')
+    assert inputs==['typed'] and 'couldn\'t verify' in final_text(events)
+    result=env.get('/api/activity').json()['actions'][0]['result']
+    assert result['performed']=='type_text' and result['observation_error']=='Paint pending' and 'error' not in result
 
 
 def test_file_open_claim_is_not_rewritten_as_missing_app_launch(env,tmp_path):

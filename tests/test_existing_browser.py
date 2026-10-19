@@ -107,9 +107,12 @@ def test_degraded_browser_inspection_preserves_accessibility_diagnostic(opened):
 
 def test_navigation_with_unavailable_accessibility_remains_unverified_and_can_recover_visually(opened,monkeypatch):
     diagnostic = {'available':False,'error':'Accessibility initialization failed'}
-    opened.browser.desktop.inspect = lambda identity,cancel=None:{
-        'window':next(item for item in opened.windows if item['id']==identity),
-        'elements':[],'limited':True,'accessibility':diagnostic,'note':'Use native window controls.'}
+    inspections=[]
+    def unavailable(identity,cancel=None):
+        inspections.append(identity)
+        return {'window':next(item for item in opened.windows if item['id']==identity),
+                'elements':[],'limited':True,'accessibility':diagnostic,'note':'Use native window controls.'}
+    opened.browser.desktop.inspect = unavailable
     opened.browser.address = lambda identity:None
     monkeypatch.setattr('jarvis.existing_browser.time.sleep',lambda duration:pytest.fail('Do not poll broken UIA repeatedly'))
     args = {'action':'navigate','url':'https://example.com/report'}
@@ -119,6 +122,7 @@ def test_navigation_with_unavailable_accessibility_remains_unverified_and_can_re
     assert result['performed'] == 'navigate' and result['verified'] is False
     assert result['observation']['accessibility'] == diagnostic
     assert 'Navigation input delivered' in result['message']
+    assert inspections == [9]  # Do not repeat known-broken accessibility initialization.
     shot = {'action':'screenshot'}
     assert opened.browser.act(shot,opened.browser.preflight(shot))['window_id'] == 9
     scroll = {'action':'scroll','direction':'down','amount':2}
@@ -221,3 +225,172 @@ def test_existing_browser_url_entry_enables_and_uses_emergency_corner(monkeypatc
     module.failSafeCheck = lambda:checks.append(module.FAILSAFE)
     ExistingBrowser.type_url('https://example.com/'+'x'*100)
     assert checks == [True]*len(captured) and len(checks)>1
+
+
+@pytest.fixture
+def browser_clock(monkeypatch):
+    clock=[0.0]
+    monkeypatch.setattr('jarvis.existing_browser.time.monotonic',lambda:clock[0])
+    monkeypatch.setattr('jarvis.existing_browser.time.sleep',lambda seconds:clock.__setitem__(0,clock[0]+seconds))
+    return clock
+
+
+def test_read_recovers_replaced_window_in_same_browser_and_invalidates_old_controls(opened):
+    opened.foreground[0]=8
+    args={'action':'read'}
+    opened.browser.act(args,opened.browser.preflight(args))
+    preview=opened.browser.preflight(args)
+    opened.browser.desktop.elements={'old':{'window_id':8},'other-app':{'window_id':70}}
+    opened.windows[0]={'id':18,'pid':180,'title':'Changed page title','process':'chrome.exe'}
+    opened.foreground[0]=9  # An unrelated browser must not steal the recovered read.
+    result=opened.browser.act(args,preview)
+    assert result['window_id']==18 and result['observation']['window']['id']==18
+    assert result['observation']['window_recovered'] and result['observation']['previous_window_id']==8
+    assert opened.browser.desktop.elements=={'other-app':{'window_id':70}}
+    assert not opened.keys and not opened.native
+
+
+def test_control_action_never_follows_replacement_browser_with_stale_element(opened):
+    args={'action':'click','element_id':'observed'}
+    preview=opened.browser.preflight(args)
+    opened.windows[1]={'id':19,'pid':190,'title':'Replacement window','process':'msedge.exe'}
+    with pytest.raises(ValueError,match='window changed'):
+        opened.browser.act(args,preview)
+    assert not opened.native and not opened.keys
+
+
+def test_navigation_rejects_reused_window_handle_before_sending_input(opened):
+    args={'action':'navigate','url':'https://example.com'}
+    preview=opened.browser.preflight(args)
+    opened.windows[1]['pid']=190
+    with pytest.raises(ValueError,match='changed identity'):
+        opened.browser.act(args,preview)
+    assert not opened.keys and not opened.typed
+
+
+@pytest.mark.parametrize('replace_original',[False,True])
+def test_navigation_observes_new_same_browser_window_without_replaying_input(opened,replace_original):
+    args={'action':'navigate','url':'https://example.com/account'}
+    preview=opened.browser.preflight(args)
+    opened.browser.desktop.elements={'old-tab':{'window_id':9}}
+    original_keys=opened.browser.keys
+    def keys(*value):
+        original_keys(*value)
+        if value==('enter',):
+            if replace_original: opened.windows[:]=[item for item in opened.windows if item['id']!=9]
+            opened.windows.append({'id':19,'pid':90,'title':'Account - a new title','process':'msedge.exe'})
+            opened.foreground[0]=19
+    opened.browser.keys=keys
+    result=opened.browser.act(args,preview)
+    assert result['verified'] and result['actual_url']==args['url']
+    assert result['window_id']==19 and result['recovered_from_window_id']==9
+    assert result['observation']['window']['title']=='Account - a new title'
+    assert opened.keys.count(('enter',))==1 and opened.typed==[args['url']]
+    assert opened.browser.desktop.elements=={}
+
+
+def test_title_change_does_not_invalidate_browser_identity(opened):
+    args={'action':'navigate','url':'https://example.com/inbox'}
+    preview=opened.browser.preflight(args)
+    opened.windows[1]['title']='Inbox (2) - a changing page title'
+    result=opened.browser.act(args,preview)
+    assert result['verified'] and result['window_id']==9 and result['recovered_from_window_id'] is None
+
+
+@pytest.mark.parametrize('actual',[
+    'https://login.example.net/sign-in',
+    'https://example.com/report?account=other',
+    'https://example.com:8443/report',
+    'http://example.com/report',
+])
+def test_redirect_reports_actual_url_and_stays_unverified(opened,browser_clock,actual):
+    args={'action':'navigate','url':'https://example.com/report'}
+    opened.browser.address=lambda identity:actual
+    result=opened.browser.act(args,opened.browser.preflight(args))
+    assert result['verified'] is False and result['redirected']
+    assert result['navigation_status']=='redirected' and result['actual_url']==actual
+    assert result['observation']['url']==actual and result['requested_url']==args['url']
+    assert opened.typed==[args['url']] and opened.keys.count(('enter',))==1
+    assert browser_clock[0]<6.2
+
+
+def test_slow_navigation_waits_for_observed_url_and_only_submits_once(opened,browser_clock):
+    url='https://example.com/slow'
+    opened.browser.address=lambda identity:url if browser_clock[0]>=.6 else None
+    args={'action':'navigate','url':url}
+    result=opened.browser.act(args,opened.browser.preflight(args))
+    assert result['verified'] and .6<=browser_clock[0]<6
+    assert opened.keys.count(('enter',))==1
+
+
+def test_failed_final_observation_retains_delivered_input_without_false_success(opened):
+    args={'action':'navigate','url':'https://example.com/report'}
+    inspect=opened.browser.desktop.inspect
+    calls=[]
+    def final_inspection_fails(identity,cancel=None):
+        calls.append(identity)
+        if len(calls)>1: raise ValueError('Window disappeared during inspection')
+        return inspect(identity,cancel)
+    opened.browser.desktop.inspect=final_inspection_fails
+    result=opened.browser.act(args,opened.browser.preflight(args))
+    assert result['performed']=='navigate' and result['verified'] is False
+    assert result['actual_url'] is None and result['observation'] is None
+    assert 'Window disappeared' in result['observation_error']
+    assert opened.keys.count(('enter',))==1 and opened.typed==[args['url']]
+
+
+def test_navigation_does_not_substitute_unrelated_browser_after_selected_one_closes(opened,browser_clock):
+    args={'action':'navigate','url':'https://example.com/report'}
+    original_keys=opened.browser.keys
+    def keys(*value):
+        original_keys(*value)
+        if value==('enter',):
+            opened.windows[:]=[item for item in opened.windows if item['id']!=9]
+            opened.foreground[0]=8
+    opened.browser.keys=keys
+    result=opened.browser.act(args,opened.browser.preflight(args))
+    assert result['verified'] is False and result['observation'] is None
+    assert result['actual_url'] is None and result['window_id']==9
+    assert 'selected browser' in result['observation_error']
+    assert opened.keys.count(('enter',))==1
+
+
+def test_cancellation_during_navigation_observation_never_replays_input(opened,browser_clock):
+    from jarvis.execution import Cancelled
+    opened.browser.address=lambda identity:None
+    class Cancellation:
+        def check(self):
+            if browser_clock[0]>=.3: raise Cancelled('Task cancelled')
+    args={'action':'navigate','url':'https://example.com/slow'}
+    with pytest.raises(Cancelled): opened.browser.act(args,opened.browser.preflight(args),Cancellation())
+    assert opened.keys.count(('enter',))==1 and opened.typed==[args['url']]
+
+
+def test_delivered_native_action_with_closed_window_returns_observation_failure(opened):
+    args={'action':'scroll','direction':'down','amount':2}
+    def scroll_then_close(native,preview,cancel=None):
+        opened.native.append(native)
+        opened.windows.clear()
+        return {'performed':'scroll'}
+    opened.browser.desktop.act=scroll_then_close
+    result=opened.browser.act(args,opened.browser.preflight(args))
+    assert result['performed']=='scroll' and result['verified'] is False
+    assert 'browser window changed' in result['observation_error']
+    assert 'do not repeat the input' in result['note'] and len(opened.native)==1
+
+
+def test_browser_click_observes_new_foreground_window_and_drops_old_controls(opened):
+    args={'action':'click','element_id':'observed'}
+    opened.browser.desktop.elements={'old-tab':{'window_id':9}}
+    def opens_window(native,preview,cancel=None):
+        opened.native.append(native)
+        opened.windows.append({'id':19,'pid':90,'title':'Sign-in popup','process':'msedge.exe'})
+        opened.foreground[0]=19
+        return {'performed':'click','window_id':9}
+    opened.browser.desktop.act=opens_window
+    result=opened.browser.act(args,opened.browser.preflight(args))
+    assert result['window_id']==9  # The receipt identifies where input was sent.
+    assert result['observation']['window']['id']==19
+    assert result['observation']['window_recovered'] and result['observation']['previous_window_id']==9
+    assert opened.browser.window_id==19 and opened.browser.desktop.elements=={}
+    assert len(opened.native)==1

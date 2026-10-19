@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {SpeechPlayer, speechSegments} = require('../jarvis/static/speech.js');
+const {SpeechPlayer, speechSegments, speechText} = require('../jarvis/static/speech.js');
 const {VoiceSession, chooseVoice} = require('../jarvis/static/voice.js');
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -14,7 +14,7 @@ function playerFixture(options = {}) {
     getSettings:() => ({speech_mode:'auto',speech_available:true}),
     fetch:async (url, request) => {requests.push({url,...request}); return response();},
     audioFactory:() => {
-      const audio = {playCount:0,paused:false,play() {this.playCount++; return Promise.resolve();},pause() {this.paused=true;},removeAttribute() {},load() {}};
+      const audio = {playCount:0,loadCount:0,paused:false,play() {this.playCount++; return Promise.resolve();},pause() {this.paused=true;},removeAttribute() {},load() {this.loadCount++;}};
       audios.push(audio); return audio;
     }, createObjectURL:() => 'blob:audio-' + (++sequence), revokeObjectURL:url => revoked.push(url), ...options,
   });
@@ -68,12 +68,14 @@ test('long replies prefetch the following passage during playback without droppi
   const f = playerFixture();
   const text = 'This is a full sentence. '.repeat(260).trim();
   const task = f.player.play(text); await tick();
-  assert.equal(f.requests.length,2);
-  assert.equal(f.audios.length,1);
+  assert.equal(f.requests.length,3);
+  assert.equal(f.audios.filter(audio=>audio.playCount).length,1);
+  assert.equal(f.audios[1].loadCount,1);
+  assert.equal(f.audios[1].playCount,0);
   const segments = speechSegments(text);
   for (let index=0;index<segments.length;index++) {
-    assert.equal(f.audios.length,index+1);
-    f.audios[index].onended(); await tick();
+    assert.equal(f.audios.filter(audio=>audio.playCount).length,index+1);
+    f.player.active.audio.onended(); await tick();
   }
   await task;
   assert.equal(f.requests.map(request=>JSON.parse(request.body).text).join(' '),text);
@@ -96,10 +98,10 @@ test('cancelling active audio pauses playback and releases every prefetched obje
   const task = f.player.play('A full sentence. '.repeat(400)); await tick();
   const lateEnd = f.audios[0].onended;
   f.player.cancel(); await task;
-  assert.equal(f.audios[0].paused,true);
-  assert.equal(f.revoked.length,2);
+  assert.ok(f.audios.every(audio=>audio.paused));
+  assert.equal(f.revoked.length,3);
   lateEnd(); await tick();
-  assert.equal(f.audios.length,1);
+  assert.equal(f.audios.filter(audio=>audio.playCount).length,1);
 });
 
 test('a second reply cancels the first without allowing stale playback', async () => {
@@ -226,13 +228,13 @@ test('first audio starts from a short passage before later generation completes'
   const segments = speechSegments(text);
   assert.ok(segments[0].length<=240);
   assert.ok(segments.length>2);
-  assert.equal(requests,2);
-  assert.equal(p.audios.length,1);
+  assert.equal(requests,3);
+  assert.equal(p.audios.filter(audio=>audio.playCount).length,1);
   assert.equal(p.audios[0].playCount,1);
   p.audios[0].onended(); await tick();
-  assert.equal(p.audios.length,1);
+  assert.equal(p.audios.filter(audio=>audio.playCount).length,1);
   later.resolve(response()); await tick();
-  for(let index=1;index<segments.length;index++) {p.audios[index].onended();await tick();}
+  for(let index=1;index<segments.length;index++) {p.player.active.audio.onended();await tick();}
   await task;
   assert.equal(p.revoked.length,segments.length);
 });
@@ -240,4 +242,39 @@ test('first audio starts from a short passage before later generation completes'
 test('short conversational replies remain one natural passage', () => {
   const text='Good evening. Spotify is open and ready for you.';
   assert.deepEqual(speechSegments(text),[text]);
+});
+
+test('numbered and spaced lists become compact phrases without speaking layout or losing values', () => {
+  const input = 'Here is your plan:\n\n  1. **Open Outlook**\n\n  2) Read the 3 messages\n\n  3. Visit https://example.com/a_b#tasks\n';
+  const expected = 'Here is your plan: Open Outlook; Read the 3 messages; Visit https://example.com/a_b#tasks.';
+  assert.equal(speechText(input),expected);
+  assert.equal(speechText(expected),expected);
+  assert.equal(speechSegments(input).join(' '),expected);
+});
+
+test('bullets, continuation lines and markup use short boundaries while real numbers stay intact', () => {
+  const input = '## Today\n\n- [ ] Take 1.5 mg at 9:30\n  with  200 ml water\n\n• Call `Task 2`\n+ Open [the report](https://example.com/report)\n\nThen\tfinish.&nbsp; Thank\u200Byou.';
+  const expected = 'Today. Take 1.5 mg at 9:30 with 200 ml water; Call Task 2; Open the report; Then finish. Thankyou.';
+  assert.equal(speechText(input),expected);
+  assert.equal(speechText('Use C# and https://example.com/a_b#top; keep 2 * 3 = 6.'),'Use C# and https://example.com/a_b#top; keep 2 * 3 = 6.');
+  assert.equal(speechText('__Open__ https://example.com/a__b__c'),'Open https://example.com/a__b__c');
+  assert.deepEqual(speechSegments('\n\t&nbsp;\u200B\n---\n'),[]);
+});
+
+test('prepared neural passages are loaded before playback and reused at the next boundary', async () => {
+  const p = playerFixture();
+  const text = 'A useful detail with a brief pause. '.repeat(20);
+  const task = p.player.play(text); await tick();
+  assert.equal(speechSegments(text).length,2);
+  const first=p.audios[0], following=p.audios[1];
+  assert.equal(first.playCount,1);
+  assert.equal(following.loadCount,1);
+  assert.equal(following.playCount,0);
+  first.onended(); await tick();
+  assert.equal(p.player.active.audio,following);
+  assert.equal(following.playCount,1);
+  assert.equal(following.loadCount,1);
+  following.onended(); await task;
+  assert.equal(p.audios.length,2);
+  assert.equal(p.requests.length,2);
 });

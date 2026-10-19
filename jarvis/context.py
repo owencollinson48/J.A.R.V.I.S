@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 
 
-VOLATILE_TOOLS = {'inspect_window', 'list_windows', 'desktop_screenshot', 'desktop_pointer',
+VOLATILE_TOOLS = {'inspect_window', 'list_windows', 'desktop_diagnostics', 'desktop_screenshot', 'desktop_pointer',
                   'desktop_action', 'browser_action', 'search_applications'}
 MEMORY_TOOLS = {'remember', 'create_task', 'update_task', 'create_goal', 'set_reminder'}
 

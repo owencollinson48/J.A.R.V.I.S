@@ -293,3 +293,171 @@ def test_native_window_enumeration_caches_processes_reads_uwp_children_and_skips
     assert process_calls==[1,11] and identities==[1,11]
     assert windows[0]['app_processes'][0]['aumid']=='SpotifyFamily!App'
     assert windows[1]['aumid']=='SpotifyFamily!App'
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Advance only the application's wait clock; never wait for a real app."""
+    import types
+    import time
+    class Clock:
+        elapsed = 0
+        on_wait = None
+        def monotonic(self): return self.elapsed
+        def sleep(self,seconds):
+            self.elapsed += seconds
+            if self.on_wait: self.on_wait()
+    clock = Clock()
+    monkeypatch.setattr('jarvis.applications.time',types.SimpleNamespace(time=time.time,monotonic=clock.monotonic,sleep=clock.sleep))
+    return clock
+
+
+def native_state(adapter):
+    def state(identity):
+        shown = next((item for item in adapter.visible if item['id']==identity),None)
+        if not shown: raise ValueError('Window no longer exists')
+        return {'focused':adapter.foreground==identity,'minimized':shown.get('minimized',False),
+                'maximized':False,'fullscreen':False,'bounds':[0,0,1000,700]}
+    adapter.window_state = state
+
+
+def prior_launch(index,shown):
+    return {'application_id':index.resolve('Spotify')['id'],'window_id':shown['id'],
+            'window':dict(shown),'verified':True,'focused':True}
+
+
+def test_current_canonical_app_can_replace_its_window_and_process_without_title_dependency(index_for):
+    index,adapter,_ = index_for(visible=[window(9,pid=99,title='A different artist and document')])
+    result = index.observe_launch(prior_launch(index,window()),timeout=0)
+    assert result['verified'] and result['observed_running']
+    assert result['window_id']==9 and result['window']['pid']==99 and result['window_replaced']
+    assert adapter.activations==[] and adapter.focused==[] and adapter.discoveries==1
+
+
+def test_replacement_browser_window_with_the_same_title_is_not_the_application(index_for):
+    index,adapter,_ = index_for(visible=[window(9,pid=99,process='chrome.exe',executable=CHROME,title='Spotify')])
+    result = index.observe_launch(prior_launch(index,window()),timeout=0,recover=True)
+    assert not result['verified'] and not result['observed_running']
+    assert adapter.focused==[] and adapter.activations==[]
+
+
+def test_launch_observation_waits_for_splash_to_main_window_handover_without_relaunch(index_for,clock):
+    index,adapter,_ = index_for(visible=[window(9,pid=99,class_name='SpotifySplashScreen')])
+    clock.on_wait = lambda: setattr(adapter,'visible',[window(10,pid=100,title='Now playing')]) if clock.elapsed>=.2 else None
+    result = index.observe_launch(prior_launch(index,window()),timeout=.6)
+    assert result['verified'] and result['window_id']==10 and result['window_replaced']
+    assert .2<=clock.elapsed<=.6
+    assert adapter.focused==[] and adapter.activations==[]
+
+
+def test_reused_old_handle_does_not_prevent_finding_an_independent_canonical_replacement(index_for):
+    index,adapter,_ = index_for(visible=[window(pid=999),window(10,pid=100)])
+    result = index.observe_launch(prior_launch(index,window()),timeout=0)
+    assert result['verified'] and result['window_id']==10 and result['window']['pid']==100
+    assert adapter.focused==[]
+
+
+def test_read_only_minimized_observation_and_requested_restore_are_distinct(index_for):
+    index,adapter,store = index_for(visible=[window(minimized=True)])
+    native_state(adapter)
+    launched = prior_launch(index,window())
+    observed = index.observe_launch(launched,timeout=0)
+    assert observed['verified'] and observed['minimized'] and observed['focused'] is False
+    assert 'recovery_attempted' not in observed and 'recovery_failed' not in observed
+    assert adapter.focused==[]
+    adapter.after_focus = lambda:adapter.visible[0].update(minimized=False)
+    recovered = index.observe_launch(launched,timeout=0,recover=True)
+    assert recovered['verified'] and recovered['focused'] and not recovered['minimized']
+    assert recovered['recovery_attempted'] is True and recovered['recovery_failed'] is False
+    assert recovered['bounds']==[0,0,1000,700]
+    assert adapter.focused==[8] and adapter.activations==[]
+    assert store.row('SELECT count(*) AS n FROM application_launches')['n']==0
+
+
+@pytest.mark.parametrize('minimized',[False,True])
+def test_restore_cannot_claim_focus_or_completion_when_windows_denies_it(index_for,minimized):
+    index,adapter,_ = index_for(visible=[window(minimized=minimized)])
+    native_state(adapter)
+    adapter.focus_allowed = False
+    observed = index.observe_launch(prior_launch(index,window()),timeout=0,recover=True)
+    assert observed['observed_running'] and observed['minimized'] is minimized and observed['focused'] is False
+    assert observed['recovery_attempted'] is True and observed['recovery_failed'] is True
+    assert adapter.focused==[8] and adapter.activations==[]
+
+
+def test_slow_launch_waits_for_real_window_and_activates_only_once(index_for,clock):
+    index,adapter,_ = index_for()
+    native_state(adapter)
+    adapter.on_activate = lambda launcher:setattr(adapter,'visible',[window(9,pid=99,class_name='AppSplash')])
+    clock.on_wait = lambda: setattr(adapter,'visible',[window(10,pid=100)]) if clock.elapsed>=.6 else None
+    result = index.launch('Spotify',timeout=1)
+    assert result['verified'] and result['window_id']==10 and result['focused']
+    assert len(adapter.activations)==1 and adapter.focused==[10]
+    assert .6<=clock.elapsed<=1
+
+
+def test_default_launch_budget_allows_a_slow_app_without_repeated_activation(index_for,clock):
+    index,adapter,_ = index_for()
+    clock.on_wait = lambda: setattr(adapter,'visible',[window()]) if clock.elapsed>=13 else None
+    result = index.launch('Spotify')
+    assert result['verified'] and result['focused']
+    assert 13<=clock.elapsed<=20 and len(adapter.activations)==1
+
+
+def test_native_launch_reobserves_and_focuses_real_window_when_splash_disappears_after_focus(index_for,clock):
+    index,adapter,_ = index_for()
+    native_state(adapter)
+    adapter.on_activate = lambda launcher:setattr(adapter,'visible',[window()])
+    clock.on_wait = lambda:setattr(adapter,'visible',[window(10,pid=100,title='Loaded library')])
+    result = index.launch('Spotify',timeout=1)
+    assert result['verified'] and result['window_id']==10 and result['focused']
+    assert adapter.focused==[8,10] and len(adapter.activations)==1
+
+
+def test_launch_transition_to_unrelated_browser_is_not_focused_or_verified(index_for,clock):
+    index,adapter,_ = index_for()
+    native_state(adapter)
+    adapter.on_activate = lambda launcher:setattr(adapter,'visible',[window()])
+    clock.on_wait = lambda:setattr(adapter,'visible',[window(10,pid=100,process='chrome.exe',executable=CHROME,title='Spotify')])
+    result = index.launch('Spotify',timeout=.4)
+    assert result['verified'] is False and result['observed_running'] is False
+    assert adapter.focused==[8] and len(adapter.activations)==1
+    assert clock.elapsed<=.4
+
+
+def test_genuinely_closed_app_stays_unverified_after_bounded_reobservation(index_for,clock):
+    index,adapter,_ = index_for()
+    result = index.observe_launch(prior_launch(index,window()),timeout=.3,recover=True)
+    assert result['verified'] is False and result['observed_running'] is False
+    assert .3<=clock.elapsed<=.31 and adapter.focused==[] and adapter.activations==[]
+
+
+@pytest.mark.parametrize('during_launch',[False,True])
+def test_cancel_during_window_wait_stops_without_new_activation_or_focus(index_for,clock,during_launch):
+    import threading
+    from jarvis.execution import Cancelled
+    index,adapter,_ = index_for()
+    class Cancellation:
+        def __init__(self): self.event = threading.Event()
+        def check(self):
+            if self.event.is_set(): raise Cancelled('Cancelled')
+    cancel = Cancellation()
+    def wait(seconds):
+        clock.sleep(seconds)
+        cancel.event.set()
+        return True
+    cancel.event.wait = wait
+    with pytest.raises(Cancelled):
+        if during_launch: index.launch('Spotify',cancel=cancel,timeout=1)
+        else: index.observe_launch(prior_launch(index,window()),cancel=cancel,timeout=.6,recover=True)
+    assert len(adapter.activations)==int(during_launch) and adapter.focused==[]
+    assert clock.elapsed<=.2
+
+
+def test_already_cancelled_request_performs_no_window_scan_or_activation(index_for):
+    from jarvis.execution import Cancelled
+    index,adapter,_ = index_for(visible=[window()])
+    class CancelledRequest:
+        def check(self): raise Cancelled('Cancelled before launch')
+    with pytest.raises(Cancelled): index.launch('Spotify',cancel=CancelledRequest())
+    assert adapter.scans==0 and adapter.focused==[] and adapter.activations==[]
