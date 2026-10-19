@@ -4,8 +4,8 @@ A personal assistant that runs on your Windows computer: natural chat, persisten
 
 ## Start on Windows
 
-1. Install **Python 3.11 or newer** from [python.org](https://www.python.org/downloads/windows/), including the Python launcher (`py`).
-2. Download or clone this repository onto your Windows computer.
+1. Install **Python 3.11 or newer** from [python.org](https://www.python.org/downloads/windows/). Enable **Add Python to PATH**. The launcher accepts `py`, `python`, or `python3`.
+2. Download or clone this repository onto your Windows computer. For a ZIP download, right-click it and choose **Extract All** first; running the batch file inside the ZIP will not work.
 3. Double-click **`Start JARVIS.bat`**. It creates a virtual environment, installs dependencies, and opens the dashboard. Keep its window open for reminders; press Ctrl+C to stop it.
 4. Open **Settings & connections** and choose a model:
    - **OpenAI:** enter an API key, retain `https://api.openai.com/v1`, and choose a model that supports Chat Completions, streaming, and tools. The default is `gpt-4.1-mini`. API usage may incur provider charges.
@@ -13,6 +13,18 @@ A personal assistant that runs on your Windows computer: natural chat, persisten
    - Other providers work if their API supports OpenAI-style streaming Chat Completions and tool calls. Supply the provider's base URL, model, and key.
 5. Click **Test connection**. This saves your settings and makes a small real model request. No model, account, or credentials are bundled with JARVIS.
 6. Set your name and computer access folders. Your user folder is included initially. Add `C:\` or another drive in Settings for broader access.
+
+### If Windows blocks the batch launcher
+
+This is a source-code distribution, not a signed Windows installer. If Smart App Control appears when opening **`Start JARVIS.bat`**, try starting the source through your installed Python:
+
+1. Extract the entire ZIP and open the folder containing `start.py`.
+2. Click File Explorer's address bar, type `cmd`, and press Enter.
+3. Run `py -3 start.py`. If you installed Python on PATH without its launcher, run `python start.py` instead.
+
+`start.py` creates the environment, installs dependencies with pip's normal verification enabled, and opens the dashboard. It reuses dependencies on later starts without requiring another download. This path does not change Windows security settings. It requires a Python installation Windows permits to run; install Python from python.org if necessary.
+
+If Smart App Control blocks **`python.exe`**, a **`.dll`**, or a **`.pyd`** dependency, the source launcher may also fail. Record the exact blocked filename if available so that component can be identified; a batch-file change cannot resolve a blocked binary.
 
 Examples to try:
 
@@ -71,4 +83,6 @@ For this cloud development workspace, run `bash scripts/setup-cloud.sh`, then `J
 
 `jarvis/assistant.py` manages streaming chat and approved tool execution; `provider.py` implements the model protocol; `computer.py` implements local tools; `store.py` provides persistence; `scheduler.py` delivers reminders; `app.py` serves the local API and interface. Tests use a deterministic model fixture; they do not establish live model quality or Windows-native notification behavior.
 
-If startup fails, read the terminal error. A missing model key affects chat, while the planner, file browser, and memory editor work independently. If a provider rejects tools, choose a tool-capable model or check its API compatibility. Actions continue to finish if a browser connection drops; reload the conversation to see the saved outcome. Interrupted commands are not automatically rerun on restart.
+If startup fails, the Windows launcher keeps the error window open. Dependency installation output is saved to `.jarvis-data\setup.log` in the extracted app folder. Share the exact error text when asking for help. If a ZIP was not fully extracted, extract it first. If Python was updated and the old environment no longer works, rename the app folder's `.venv` to `.venv-old` and restart; this leaves your separate JARVIS memory/settings directory untouched. If port 8765 is already in use, close any other JARVIS window, or run `"Start JARVIS.bat" --port 8766` from Command Prompt. `"Start JARVIS.bat" --setup-only` installs dependencies without opening the dashboard.
+
+A missing model key affects chat, while the planner, file browser, and memory editor work independently. If a provider rejects tools, choose a tool-capable model or check its API compatibility. Actions continue to finish if a browser connection drops; reload the conversation to see the saved outcome. Interrupted commands are not automatically rerun on restart.
