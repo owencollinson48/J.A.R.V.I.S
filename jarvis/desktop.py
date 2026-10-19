@@ -106,6 +106,109 @@ class DesktopControl:
         return [origin.x-bounds[0], origin.y-bounds[1]]
 
     @staticmethod
+    def capture_is_black(image, suspect=False):
+        """Detect missing window surfaces without rejecting ordinary dark UIs."""
+        if not image.width or not image.height: return True
+        sample = image.convert('RGB')
+        sample.thumbnail((160, 120))
+        def black_fraction(region):
+            pixels = region.get_flattened_data()
+            return sum(max(pixel) <= 12 for pixel in pixels) / max(1, len(pixels))
+        fraction = black_fraction(sample)
+        if not suspect: return fraction >= .9995
+        # A title/toolbar can render while the large GPU-backed body stays black.
+        center = sample.crop((sample.width//5, sample.height//5,
+                              max(sample.width//5+1, sample.width*4//5),
+                              max(sample.height//5+1, sample.height*4//5)))
+        return fraction >= .98 or (fraction >= .7 and black_fraction(center) >= .995)
+
+    @staticmethod
+    def capture_client_rect(window_id, bounds):
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetClientRect.restype = wintypes.BOOL
+        rect = wintypes.RECT()
+        if not user32.GetClientRect(window_id, ctypes.byref(rect)) or rect.right <= rect.left or rect.bottom <= rect.top:
+            raise ValueError('The requested window has no available client area. Restore it and capture again.')
+        offset = DesktopControl.capture_offset(window_id, bounds)
+        x, y = bounds[0]+offset[0]+rect.left, bounds[1]+offset[1]+rect.top
+        return (x, y, x+rect.right-rect.left, y+rect.bottom-rect.top)
+
+    @staticmethod
+    def virtual_screen_bounds():
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+        user32.GetSystemMetrics.restype = ctypes.c_int
+        left, top, width, height = (user32.GetSystemMetrics(index) for index in (76, 77, 78, 79))
+        if width <= 0 or height <= 0:
+            raise ValueError('The Windows desktop is unavailable. Keep the desktop signed in and unlocked, then capture again.')
+        return (left, top, left+width, top+height)
+
+    @staticmethod
+    def flush_compositor():
+        try:
+            flush = ctypes.WinDLL('dwmapi', use_last_error=True).DwmFlush
+            flush.argtypes = []
+            flush.restype = ctypes.c_int32
+            flush()
+        except (OSError, AttributeError):
+            pass  # Composition synchronization is optional on older desktops.
+
+    def check_screen_capture(self, item, rect, cancel):
+        if cancel: cancel.check()
+        current = self.native_window(item['id'])
+        if (item['pid'], item['bounds']) != (current['pid'], current['bounds']) or current['minimized']:
+            raise ValueError('The window changed during capture. Inspect and capture it again.')
+        if WindowsApplications.foreground_window() != item['id']:
+            raise ValueError('The requested window lost foreground focus during capture. Focus it and capture again.')
+        if self.capture_client_rect(item['id'], current['bounds']) != rect:
+            raise ValueError('The window client area changed during capture. Inspect and capture it again.')
+        # Sample ownership before and after the desktop copy. The exact pointer
+        # location is checked again before any later click, including small overlays.
+        left, top, right, bottom = rect
+        # Windows 11 rounded/custom frames expose the background at the exact
+        # rectangle corners. Sample the interior rather than rejecting the app.
+        inset_x, inset_y = min(12, (right-left-1)//4), min(12, (bottom-top-1)//4)
+        left += inset_x; right -= inset_x
+        top += inset_y; bottom -= inset_y
+        for row in range(5):
+            for column in range(5):
+                if cancel: cancel.check()
+                self.ensure_pointer_target(item['id'], left+(right-left-1)*column//4,
+                                           top+(bottom-top-1)*row//4)
+
+    def capture_visible_window(self, item, cancel=None):
+        """Recover GPU-backed clients through the composed desktop, not a window DC."""
+        if cancel: cancel.check()
+        self.ensure_focus(item['id'])
+        if cancel: cancel.check()
+        current = self.native_window(item['id'])
+        if (item['pid'], item['bounds']) != (current['pid'], current['bounds']):
+            raise ValueError('The window changed while focusing. Inspect and capture it again.')
+        rect = self.capture_client_rect(item['id'], current['bounds'])
+        screen = self.virtual_screen_bounds()
+        if rect[0] < screen[0] or rect[1] < screen[1] or rect[2] > screen[2] or rect[3] > screen[3]:
+            raise ValueError('The requested window is partly off screen. Maximize it or move it fully onto a display, then capture again.')
+        from PIL import ImageGrab
+        for attempt in range(2):
+            if cancel: cancel.check()
+            if attempt: time.sleep(.05)
+            self.flush_compositor()
+            self.check_screen_capture(current, rect, cancel)
+            image = ImageGrab.grab(bbox=rect, all_screens=True, include_layered_windows=True)
+            self.check_screen_capture(current, rect, cancel)
+            if image.size != (rect[2]-rect[0], rect[3]-rect[1]):
+                raise ValueError('Windows returned an unexpected screenshot size. Capture the requested window again.')
+            if not self.capture_is_black(image):
+                offset = [rect[0]-current['bounds'][0], rect[1]-current['bounds'][1]]
+                return image, offset
+        raise ValueError('Windows returned black pixels from both window and visible-screen capture. '
+                         'No usable screenshot was sent to the AI. Keep the desktop unlocked and the app visible; '
+                         'a locked or disconnected session or capture-protected content may be unavailable. '
+                         'Use accessible controls if available; do not click based on this failed capture or repeat an input already delivered.')
+
+    @staticmethod
     def info(control):
         info = control.element_info
         try:
@@ -422,16 +525,38 @@ class DesktopControl:
             # pointer input. Initialize it before reading capture coordinates.
             import pyautogui
             item = self.native_window(window_id)
-            if item['minimized']: raise ValueError('Restore the requested window before capturing it.')
-            offset = self.capture_offset(window_id, item['bounds'])
+            if item['minimized']:
+                self.ensure_focus(window_id)
+                if cancel: cancel.check()
+                restored = self.native_window(window_id)
+                if restored['pid'] != item['pid'] or restored['minimized']:
+                    raise ValueError('The requested window could not be restored for capture. Inspect it again.')
+                item = restored
+            client_rect = self.capture_client_rect(window_id, item['bounds'])
+            offset = [client_rect[0]-item['bounds'][0], client_rect[1]-item['bounds'][1]]
             from PIL import ImageGrab
-            image = ImageGrab.grab(window=window_id, include_layered_windows=True)
+            capture_error = None
+            try: image = ImageGrab.grab(window=window_id, include_layered_windows=True)
+            except (OSError, ValueError) as exc:
+                image = None
+                capture_error = f'{type(exc).__name__}: {str(exc)[:500]}'
             if cancel: cancel.check()
             after = self.native_window(window_id)
-            if (item['pid'], item['bounds']) != (after['pid'], after['bounds']):
+            if (item['pid'], item['bounds']) != (after['pid'], after['bounds']) or after['minimized']:
                 raise ValueError('The window changed during capture. Inspect and capture it again.')
+            if self.capture_client_rect(window_id, after['bounds']) != client_rect:
+                raise ValueError('The window client area changed during capture. Inspect and capture it again.')
+            method = 'window'
+            expected_size = (client_rect[2]-client_rect[0], client_rect[3]-client_rect[1])
+            if image is not None and image.size != expected_size:
+                capture_error = 'The window drawing surface returned an unexpected pixel size.'
+            if image is None or image.size != expected_size or self.capture_is_black(image, suspect=True):
+                image, offset = self.capture_visible_window(item, cancel)
+                method = 'visible_screen'
+            if cancel: cancel.check()
             return {**self.images.save(image), 'window_id': item['id'], 'title': item['title'], 'bounds': item['bounds'],
-                    'capture_offset': offset,
+                    'capture_offset': offset, 'capture_method': method,
+                    **({'capture_recovery': capture_error or 'The window drawing surface returned black or empty pixels.'} if method == 'visible_screen' else {}),
                     'coordinate_note': 'The image contains the window client area. desktop_pointer uses outer-window pixels: x = preview_x * original_width/width + capture_offset[0]; y = preview_y * original_height/height + capture_offset[1].'}
 
     @staticmethod

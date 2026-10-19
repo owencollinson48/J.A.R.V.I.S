@@ -13,7 +13,9 @@ import pytest
 
 from jarvis.applications import ApplicationIndex
 from jarvis.config import Settings
+from jarvis.desktop import DesktopControl, Images
 from jarvis.store import Store
+from PIL import Image
 
 pytestmark = pytest.mark.skipif(platform.system() != 'Windows' or os.getenv('JARVIS_WINDOWS_LIVE') != '1',
                                 reason='Requires opted-in interactive Windows desktop')
@@ -31,7 +33,7 @@ def native_index(tmp_path):
 
 
 @pytest.mark.parametrize('query,kind', [('Notepad',None),('Calculator','aumid'),('Outlook',None)])
-def test_installed_application_visible_launch(native_index,query,kind):
+def test_installed_application_visible_launch(native_index,query,kind,tmp_path):
     candidates = native_index.search(query)
     if kind: candidates = [app for app in candidates if any(method['kind']==kind for method in app['launchers'])]
     if not candidates: pytest.skip(f'{query} with requested activation type is not installed')
@@ -41,3 +43,9 @@ def test_installed_application_visible_launch(native_index,query,kind):
         print(app['name'],result)
         assert result['verified'], result
         assert result.get('window_id'), result
+        desktop = DesktopControl(Images(tmp_path))
+        captured = desktop.screenshot(result['window_id'])
+        print('Capture:', captured)
+        assert captured['capture_method'] in {'window','visible_screen'}
+        with Image.open(desktop.images.path(captured['image_id'])) as image:
+            assert not desktop.capture_is_black(image), 'The captured app is still black'

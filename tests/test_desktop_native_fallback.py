@@ -22,7 +22,8 @@ def native(tmp_path,monkeypatch):
            'minimized':False,'maximized':False,'fullscreen':False,'focuses':[],
            'sizes':[],'events':[],'captures':[],'uia_calls':0,'fail_safe':False,'on_focus':None,
            'unicode_callbacks':[],'point_hit':171,'point_root':71,'point_owner':71,'points':[],
-           'capture_offset':[0,0]}
+           'capture_offset':[0,0],'client_size':[2000,1200],
+           'screen_bounds':[-2560,0,3840,2160],'point_callback':None,'point_ancestors':{}}
     desktop=DesktopControl(Images(tmp_path))
     monkeypatch.setattr(desktop,'require_windows',lambda:None)
     monkeypatch.setattr(WindowsApplications,'windows',lambda:[dict(state['window'])] if state['visible'] else [])
@@ -47,15 +48,28 @@ def native(tmp_path,monkeypatch):
         def __call__(self,*args): return self.callback(*args)
     def hit_test(point):
         state['points'].append((point.x,point.y))
+        if state['point_callback']: return state['point_callback'](point.x,point.y)
         return state['point_hit']
+    def ancestor(identity,flag):
+        root,owner=state['point_ancestors'].get(identity,(state['point_root'],state['point_owner']))
+        return root if flag==2 else owner
     def client_to_screen(identity,output):
         assert identity==71
         output._obj.x=state['bounds'][0]+state['capture_offset'][0]
         output._obj.y=state['bounds'][1]+state['capture_offset'][1]
         return True
+    def client_rect(identity,output):
+        assert identity==71
+        output._obj.left=output._obj.top=0
+        output._obj.right,output._obj.bottom=state['client_size']
+        return True
+    def screen_metric(metric):
+        left,top,right,bottom=state['screen_bounds']
+        return {76:left,77:top,78:right-left,79:bottom-top}[metric]
     user32=types.SimpleNamespace(WindowFromPoint=NativeCall(hit_test),
-        GetAncestor=NativeCall(lambda identity,flag:state['point_root'] if flag==2 else state['point_owner']),
-        ClientToScreen=NativeCall(client_to_screen))
+        GetAncestor=NativeCall(ancestor),
+        ClientToScreen=NativeCall(client_to_screen),GetClientRect=NativeCall(client_rect),
+        GetSystemMetrics=NativeCall(screen_metric))
     monkeypatch.setattr('jarvis.desktop.ctypes.WinDLL',lambda *args,**kwargs:user32,raising=False)
     def size_window(identity,action):
         state['sizes'].append(action)
@@ -117,6 +131,7 @@ def test_screenshot_targets_only_requested_hwnd_and_reports_original_pixel_size(
     result=desktop.screenshot(71)
     assert state['uia_calls']==0
     assert state['captures']==[{'window':71,'include_layered_windows':True}]
+    assert result['capture_method']=='window'
     assert result['window_id']==71 and result['title']=='Current browser'
     assert result['bounds']==[100,200,2100,1400]
     assert (result['original_width'],result['original_height'])==(2000,1200)
@@ -134,6 +149,208 @@ def test_screenshot_client_offset_and_preview_scale_map_to_outer_window_pointer_
     y=int(80*capture['original_height']/capture['height']+capture['capture_offset'][1])
     desktop.pointer(71,x,y)
     assert ('click',(208,331),{'button':'left','clicks':1,'interval':0}) in state['events']
+
+
+def black_window_capture(monkeypatch,state,on_screen=None,window_error=None,toolbar_height=3):
+    """Simulate a broken HWND capture while keeping screen pixels independent."""
+    def capture(**kwargs):
+        state['captures'].append(kwargs)
+        if 'window' in kwargs:
+            if window_error: raise window_error
+            # A painted non-client frame must not hide a black application centre.
+            image=Image.new('RGB',tuple(state['client_size']),'black')
+            image.paste('white',(0,0,image.width,toolbar_height))
+            return image
+        if on_screen: return on_screen(kwargs)
+        left,top,right,bottom=kwargs['bbox']
+        return Image.new('RGB',(right-left,bottom-top),(20,90,170))
+    monkeypatch.setattr('PIL.ImageGrab.grab',capture)
+
+
+@pytest.mark.parametrize('toolbar_height',[3,200])
+def test_black_hwnd_uses_visible_client_pixels_and_preserves_pointer_coordinates(native,monkeypatch,toolbar_height):
+    desktop,state,_,_=native
+    state.update(bounds=[100,200,2120,1450],capture_offset=[8,31])
+    black_window_capture(monkeypatch,state,toolbar_height=toolbar_height)
+    result=desktop.screenshot(71)
+    assert result['capture_method']=='visible_screen'
+    assert state['captures']==[{'window':71,'include_layered_windows':True},
+        {'bbox':(108,231,2108,1431),'all_screens':True,'include_layered_windows':True}]
+    assert state['uia_calls']==0 and state['focuses']
+    assert result['capture_offset']==[8,31]
+    assert (result['original_width'],result['original_height'])==(2000,1200)
+    assert (result['width'],result['height'])==(1600,960)
+    with Image.open(desktop.images.path(result['image_id'])) as preview:
+        pixel=preview.getpixel((preview.width//2,preview.height//2))
+        assert all(abs(channel-expected)<=3 for channel,expected in zip(pixel,(20,90,170)))
+    desktop.pointer(71,108,131)
+    assert ('click',(208,331),{'button':'left','clicks':1,'interval':0}) in state['events']
+
+
+def test_hwnd_capture_error_recovers_from_composed_screen_without_uia(native,monkeypatch):
+    desktop,state,_,_=native
+    black_window_capture(monkeypatch,state,window_error=OSError('Device context capture failed'))
+    result=desktop.screenshot(71)
+    assert result['capture_method']=='visible_screen'
+    assert state['uia_calls']==0 and len(state['captures'])==2
+    assert desktop.images.path(result['image_id']).is_file()
+
+
+def test_minimized_capture_restores_window_and_reads_its_restored_geometry(native,monkeypatch):
+    desktop,state,_,_=native
+    state.update(minimized=True,bounds=[-32000,-32000,-30000,-30800])
+    def restore(): state.update(minimized=False,bounds=[100,200,2100,1400])
+    state['on_focus']=restore
+    black_window_capture(monkeypatch,state)
+    result=desktop.screenshot(71)
+    assert result['capture_method']=='visible_screen'
+    assert result['bounds']==[100,200,2100,1400]
+    assert state['captures'][-1]['bbox']==(100,200,2100,1400)
+    assert not state['events'] and state['uia_calls']==0
+
+
+def test_still_black_visible_capture_retries_once_then_publishes_no_image(native,monkeypatch):
+    desktop,state,_,_=native
+    black_window_capture(monkeypatch,state,on_screen=lambda kwargs:Image.new('RGB',(2000,1200),'black'))
+    with pytest.raises(ValueError,match='black'): desktop.screenshot(71)
+    assert sum('bbox' in capture for capture in state['captures'])==2
+    assert not list(desktop.images.folder.glob('*.jpg'))
+    assert not state['events'] and state['uia_calls']==0
+
+
+def test_visible_capture_recovers_when_compositor_draws_on_the_bounded_retry(native,monkeypatch):
+    desktop,state,_,_=native
+    attempts=[]
+    def screen(kwargs):
+        attempts.append(kwargs)
+        return Image.new('RGB',(2000,1200),'black' if len(attempts)==1 else 'navy')
+    black_window_capture(monkeypatch,state,on_screen=screen)
+    result=desktop.screenshot(71)
+    assert result['capture_method']=='visible_screen' and len(attempts)==2
+    assert desktop.images.path(result['image_id']).is_file()
+    assert not state['events'] and state['uia_calls']==0
+
+
+def test_black_capture_does_not_claim_visible_pixels_when_foreground_focus_is_refused(native,monkeypatch):
+    desktop,state,_,_=native
+    state.update(focused=99,allow_focus=False)
+    black_window_capture(monkeypatch,state)
+    with pytest.raises(ValueError,match='foreground focus'): desktop.screenshot(71)
+    assert all('window' in capture for capture in state['captures'])
+    assert not list(desktop.images.folder.glob('*.jpg'))
+
+
+@pytest.mark.parametrize('change',['pid','bounds','disappear','cancel'])
+def test_visible_fallback_rejects_identity_geometry_or_cancellation_changes_during_focus(native,monkeypatch,change):
+    desktop,state,_,_=native
+    cancel=Cancellation()
+    def mutate():
+        if change=='pid': state['window']['pid']=902
+        elif change=='bounds': state['bounds'][0]+=10
+        elif change=='disappear': state['visible']=False
+        else: cancel.stopped=True
+    state['on_focus']=mutate
+    black_window_capture(monkeypatch,state)
+    with pytest.raises(Cancelled if change=='cancel' else ValueError): desktop.screenshot(71,cancel)
+    assert all('window' in capture for capture in state['captures'])
+    assert not list(desktop.images.folder.glob('*.jpg'))
+
+
+@pytest.mark.parametrize('change',['client_size','capture_offset'])
+def test_visible_capture_uses_fresh_client_geometry_when_focus_updates_the_app(native,monkeypatch,change):
+    desktop,state,_,_=native
+    def mutate():
+        if change=='client_size': state['client_size']=[1990,1190]
+        else: state['capture_offset']=[8,31]
+    state['on_focus']=mutate
+    black_window_capture(monkeypatch,state)
+    result=desktop.screenshot(71)
+    assert result['capture_method']=='visible_screen'
+    assert (result['original_width'],result['original_height'])==tuple(state['client_size'])
+    assert result['capture_offset']==state['capture_offset']
+    x,y=state['bounds'][0]+state['capture_offset'][0],state['bounds'][1]+state['capture_offset'][1]
+    assert state['captures'][-1]['bbox']==(x,y,x+state['client_size'][0],y+state['client_size'][1])
+
+
+@pytest.mark.parametrize('change',['pid','bounds','client_size','capture_offset','focus','overlay','cancel'])
+def test_visible_fallback_revalidates_after_screen_capture_and_does_not_publish_other_pixels(native,monkeypatch,change):
+    desktop,state,_,_=native
+    cancel=Cancellation()
+    def screen(kwargs):
+        if change=='pid': state['window']['pid']=902
+        elif change=='bounds': state['bounds'][0]+=10
+        elif change=='client_size': state['client_size'][0]-=10
+        elif change=='capture_offset': state['capture_offset'][0]+=10
+        elif change=='focus': state['focused']=99
+        elif change=='overlay': state.update(point_root=99,point_owner=99)
+        else: cancel.stopped=True
+        return Image.new('RGB',(2000,1200),'navy')
+    black_window_capture(monkeypatch,state,on_screen=screen)
+    with pytest.raises(Cancelled if change=='cancel' else ValueError): desktop.screenshot(71,cancel)
+    assert not list(desktop.images.folder.glob('*.jpg'))
+
+
+def test_visible_capture_rejects_overlay_before_capturing_screen(native,monkeypatch):
+    desktop,state,_,_=native
+    state.update(point_root=99,point_owner=99)
+    black_window_capture(monkeypatch,state)
+    with pytest.raises(ValueError,match='covered by another window'): desktop.screenshot(71)
+    assert state['points'] and all('window' in capture for capture in state['captures'])
+    assert not list(desktop.images.folder.glob('*.jpg'))
+
+
+def test_visible_capture_allows_rounded_window_corners_but_checks_interior_ownership(native,monkeypatch):
+    desktop,state,_,_=native
+    state['point_ancestors'][271]=(99,99)
+    # Windows 11 rounds the outer corners, exposing the desktop behind them.
+    state['point_callback']=lambda x,y:271 if (x<112 or x>2087) and (y<212 or y>1387) else 171
+    black_window_capture(monkeypatch,state)
+    result=desktop.screenshot(71)
+    assert result['capture_method']=='visible_screen'
+    assert state['points'] and len(state['points'])>=50
+    assert all(112<=x<=2087 and 212<=y<=1387 for x,y in state['points'])
+
+
+def test_visible_capture_rejects_an_overlay_covering_only_its_interior(native,monkeypatch):
+    desktop,state,_,_=native
+    state['point_ancestors'][271]=(99,99)
+    state['point_callback']=lambda x,y:271 if abs(x-1099)<3 and abs(y-799)<3 else 171
+    black_window_capture(monkeypatch,state)
+    with pytest.raises(ValueError,match='covered by another window'): desktop.screenshot(71)
+    assert all('window' in capture for capture in state['captures'])
+    assert not list(desktop.images.folder.glob('*.jpg'))
+
+
+def test_visible_capture_supports_negative_monitor_coordinates(native,monkeypatch):
+    desktop,state,_,_=native
+    state.update(bounds=[-2400,200,-400,1400])
+    black_window_capture(monkeypatch,state)
+    result=desktop.screenshot(71)
+    assert result['capture_method']=='visible_screen'
+    assert state['captures'][-1]['bbox']==(-2400,200,-400,1400)
+    assert result['bounds']==[-2400,200,-400,1400]
+    assert all(-2400<=x<-400 and 200<=y<1400 for x,y in state['points'])
+
+
+@pytest.mark.parametrize('bounds',[[-2600,200,-600,1400],[3000,200,5000,1400],
+                                   [100,-10,2100,1190],[100,1500,2100,2700]])
+def test_visible_fallback_rejects_partly_offscreen_client_area(native,monkeypatch,bounds):
+    desktop,state,_,_=native
+    state['bounds']=bounds
+    black_window_capture(monkeypatch,state)
+    with pytest.raises(ValueError): desktop.screenshot(71)
+    assert all('window' in capture for capture in state['captures'])
+    assert not list(desktop.images.folder.glob('*.jpg'))
+
+
+def test_black_post_input_observation_failure_never_repeats_delivered_click(native,monkeypatch):
+    desktop,state,_,_=native
+    black_window_capture(monkeypatch,state,on_screen=lambda kwargs:Image.new('RGB',(2000,1200),'black'))
+    result=desktop.pointer(71,125,85)
+    assert result['performed']=='click' and result['clicked'] is True
+    assert result['verified'] is False and 'black' in result['observation_error']
+    assert sum(event[0]=='click' for event in state['events'])==1
+    assert 'image_id' not in result and not list(desktop.images.folder.glob('*.jpg'))
 
 
 @pytest.mark.parametrize('change',['pid','bounds','cancel'])
