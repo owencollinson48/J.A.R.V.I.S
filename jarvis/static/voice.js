@@ -5,8 +5,10 @@
   function chooseVoice(voices, selected = '') {
     const explicit = voices.find(v => (v.voiceURI || v.name) === selected);
     if (explicit) return explicit;
-    const british = voices.filter(v => /^en[-_]GB$/i.test(v.lang));
-    return british.find(v => /George|Ryan|Daniel|Arthur/i.test(v.name)) || british[0] || null;
+    const british = voices.filter(v => /^en[-_]GB(?:[-_].*)?$/i.test(v.lang));
+    const quality = voice => (/natural|neural|enhanced|premium/i.test(voice.name) ? 100 : 0) +
+      (/Ryan/i.test(voice.name) ? 40 : /Daniel/i.test(voice.name) ? 30 : /George|Arthur/i.test(voice.name) ? 20 : 0);
+    return british.sort((left, right) => quality(right) - quality(left))[0] || null;
   }
 
   function speechChunks(text) {
@@ -38,6 +40,7 @@
       this.makeRecognition = options.makeRecognition;
       this.synthesis = options.synthesis;
       this.makeUtterance = options.makeUtterance;
+      this.speechPlayer = options.speechPlayer;
       this.onTurn = options.onTurn;
       this.onCancel = options.onCancel;
       this.onBoundary = options.onBoundary || (() => {});
@@ -68,7 +71,7 @@
     }
 
     start() {
-      if (!this.makeRecognition || !this.synthesis || !this.makeUtterance) {
+      if (!this.makeRecognition || (!(this.synthesis && this.makeUtterance) && !this.speechPlayer?.canUse())) {
         this.onError('Hands-free voice needs speech recognition and playback. Open JARVIS in Chrome or Edge.');
         return false;
       }
@@ -236,6 +239,7 @@
       this.speaking = false;
       this.utterance = null;
       if (this.synthesis) this.synthesis.cancel();
+      this.speechPlayer?.cancel();
       if (finish) finish();
     }
 
@@ -244,7 +248,14 @@
       this.stopControlListener();
       this.cancelSpeech();
       const chunks = speechChunks(text);
-      if (!chunks.length || !this.synthesis || !this.makeUtterance) {
+      const neural = this.speechPlayer?.canUse();
+      const browser = this.synthesis && this.makeUtterance;
+      const unavailable = this.speechPlayer?.unavailableReason?.();
+      if (unavailable && !this.notifiedSpeechFallback) {
+        this.notifiedSpeechFallback = true;
+        this.onError(unavailable);
+      }
+      if (!chunks.length || (!neural && !browser)) {
         this.refreshContext();
         return Promise.resolve();
       }
@@ -253,16 +264,19 @@
       this.status('speaking');
       return new Promise(resolve => {
         this.finishSpeech = resolve;
+        const complete = () => {
+          this.finishSpeech = null;
+          this.speaking = false;
+          this.utterance = null;
+          resolve();
+          if (this.enabled) this.refreshContext();
+          else this.status('off');
+        };
         const next = () => {
           if (epoch !== this.speechEpoch) return;
           this.clear(this.speechTimer);
           if (!chunks.length) {
-            this.finishSpeech = null;
-            this.speaking = false;
-            this.utterance = null;
-            resolve();
-            if (this.enabled) this.refreshContext();
-            else this.status('off');
+            complete();
             return;
           }
           const utterance = this.makeUtterance(chunks.shift());
@@ -283,7 +297,22 @@
           try { this.synthesis.speak(utterance); }
           catch (_) { utterance.onerror(); }
         };
-        next();
+        if (neural) {
+          // One generated passage preserves natural cadence across sentences;
+          // the transport handles the service's input limit and prefetches more.
+          this.speechPlayer.play(chunks.join(' '), {rate: this.getRate(), onBoundary: this.onBoundary}).then(() => {
+            if (epoch === this.speechEpoch) complete();
+          }).catch(error => {
+            if (epoch !== this.speechEpoch) return;
+            if (!browser) { this.stop('The natural voice could not play this reply. Check the speech settings.'); return; }
+            if (!this.notifiedSpeechFallback) {
+              this.notifiedSpeechFallback = true;
+              this.onError('The natural voice is unavailable for this reply. Using the installed British voice.');
+            }
+            if (error.remainingText) chunks.splice(0, chunks.length, ...speechChunks(error.remainingText));
+            next();
+          });
+        } else next();
       });
     }
 

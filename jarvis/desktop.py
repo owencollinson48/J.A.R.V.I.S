@@ -149,7 +149,41 @@ class DesktopControl:
             action = args['action']
             if cancel: cancel.check()
             if action == 'focus':
-                return {'focused': WindowsApplications.focus(item['id']), 'window_id': item['id']}
+                focused = WindowsApplications.focus(item['id'])
+                return {'performed':'focus','verified':focused,**WindowsApplications.window_state(item['id'])}
+            if action in {'maximize','minimize','restore'}:
+                if action in {'maximize','restore'} and item['process'].lower() in {'chrome.exe','msedge.exe','firefox.exe','brave.exe','opera.exe','vivaldi.exe'}:
+                    self.ensure_focus(item['id'])
+                if action in {'maximize','restore'} and item['process'].lower() in {'chrome.exe','msedge.exe','firefox.exe','brave.exe','opera.exe','vivaldi.exe'} and WindowsApplications.window_state(item['id'])['fullscreen']:
+                    self.ensure_focus(item['id'])
+                    import pyautogui
+                    pyautogui.FAILSAFE = True
+                    pyautogui.press('f11')
+                    deadline = time.monotonic()+2
+                    while time.monotonic()<deadline and WindowsApplications.window_state(item['id'])['fullscreen']:
+                        if cancel: cancel.check()
+                        time.sleep(.05)
+                result = WindowsApplications.size_window(item['id'],action)
+                if cancel: cancel.check()
+                return result
+            if action == 'fullscreen':
+                supported = {'chrome.exe','msedge.exe','firefox.exe','brave.exe','opera.exe','vivaldi.exe'}
+                if item['process'].lower() not in supported:
+                    raise ValueError('True fullscreen is application-specific. Use maximize for this app; F11 fullscreen is supported here for browsers.')
+                self.ensure_focus(item['id'])
+                before = WindowsApplications.window_state(item['id'])
+                if not before['fullscreen']:
+                    import pyautogui
+                    pyautogui.FAILSAFE = True
+                    pyautogui.press('f11')
+                    deadline = time.monotonic()+2
+                    while time.monotonic()<deadline:
+                        if cancel: cancel.check()
+                        if WindowsApplications.window_state(item['id'])['fullscreen']: break
+                        time.sleep(.05)
+                state = WindowsApplications.window_state(item['id'])
+                return {'performed':'fullscreen','verified':state['fullscreen'],**state}
+
             if action == 'close':
                 wrapper.close()
                 time.sleep(.2)

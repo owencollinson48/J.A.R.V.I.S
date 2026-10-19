@@ -255,13 +255,66 @@ class WindowsApplications:
         return result
 
     @staticmethod
+    def foreground_window():
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        return int(user32.GetForegroundWindow() or 0)
+
+    @staticmethod
+    def window_state(window_id):
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        for name in ('IsIconic','IsZoomed','IsWindow'):
+            getattr(user32,name).argtypes = [wintypes.HWND]
+        user32.GetWindowRect.argtypes = [wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
+        user32.GetWindowLongW.argtypes = [wintypes.HWND,ctypes.c_int]
+        user32.GetWindowLongW.restype = ctypes.c_long
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND,wintypes.DWORD]
+        user32.MonitorFromWindow.restype = wintypes.HANDLE
+        class MonitorInfo(ctypes.Structure):
+            _fields_ = [('cbSize',wintypes.DWORD),('rcMonitor',wintypes.RECT),('rcWork',wintypes.RECT),('dwFlags',wintypes.DWORD)]
+        user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE,ctypes.POINTER(MonitorInfo)]
+        if not user32.IsWindow(window_id): raise ValueError('Window no longer exists')
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(window_id,ctypes.byref(rect)): raise ValueError('Window bounds are unavailable')
+        monitor = MonitorInfo(); monitor.cbSize = ctypes.sizeof(MonitorInfo)
+        has_monitor = user32.GetMonitorInfoW(user32.MonitorFromWindow(window_id,2),ctypes.byref(monitor))
+        bounds = [rect.left,rect.top,rect.right,rect.bottom]
+        fills_monitor = bool(has_monitor and all(abs(a-b)<=3 for a,b in zip(bounds,[monitor.rcMonitor.left,monitor.rcMonitor.top,monitor.rcMonitor.right,monitor.rcMonitor.bottom])))
+        caption = bool(user32.GetWindowLongW(window_id,-16) & 0x00c00000)
+        return {'window_id':window_id,'focused':WindowsApplications.foreground_window()==window_id,
+                'minimized':bool(user32.IsIconic(window_id)),'maximized':bool(user32.IsZoomed(window_id)),
+                'fullscreen':fills_monitor and not caption,'bounds':bounds}
+
+    @staticmethod
     def focus(window_id):
         from ctypes import wintypes
         user32 = ctypes.WinDLL('user32', use_last_error=True)
         user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.IsIconic.argtypes = [wintypes.HWND]
         user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-        user32.ShowWindow(window_id, 9)
-        return bool(user32.SetForegroundWindow(window_id))
+        # Restore only a minimized window; bringing a maximized app forward must
+        # preserve its size. Windows still decides whether foreground focus is allowed.
+        if user32.IsIconic(window_id): user32.ShowWindow(window_id,9)
+        user32.SetForegroundWindow(window_id)
+        return WindowsApplications.foreground_window() == window_id
+
+    @staticmethod
+    def size_window(window_id, action):
+        from ctypes import wintypes
+        commands = {'maximize':3,'minimize':6,'restore':9}
+        if action not in commands: raise ValueError('Unsupported window size action')
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.ShowWindow.argtypes = [wintypes.HWND,ctypes.c_int]
+        user32.ShowWindow(window_id,commands[action])
+        if action != 'minimize': WindowsApplications.focus(window_id)
+        deadline = time.monotonic()+2
+        while True:
+            state = WindowsApplications.window_state(window_id)
+            verified = state['maximized'] if action=='maximize' else state['minimized'] if action=='minimize' else not state['minimized'] and not state['maximized']
+            if verified or time.monotonic()>=deadline: return {'performed':action,'verified':verified,**state}
+            time.sleep(.05)
 
     @staticmethod
     def activate(launcher):

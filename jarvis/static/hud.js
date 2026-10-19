@@ -106,6 +106,7 @@
     showTaskFlow(){tabs.children[0].click();},
     setVoice(state){phase=state.phase;updateLabels();if(phase==='listening'&&!document.hidden)startMeter();else stopMeter();},
     pulse(){pulse=.5+Math.random()*.4;},
+    setSpeechEnergy(value){if(phase==='speaking') pulse=Math.min(1,Math.max(0,value));},
     setBusy(value){running=value;updateLabels();},
     updateWorkflow(value,recorded=[]){workflow=value;actions=recorded;drawAll();},
   };

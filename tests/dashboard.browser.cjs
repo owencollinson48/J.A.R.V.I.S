@@ -20,13 +20,14 @@ async function installSpeech(page) {
   Object.defineProperty(window,'SpeechSynthesisUtterance',{value:class {constructor(text){this.text=text;}},configurable:true});
  });
 }
-async function installAPI(page, permissionsMode='autonomous') {
- const messages=[], pending=[], prompts=[], decisions=[];let workflow=null,actions=[];
+async function installAPI(page, permissionsMode='autonomous', neural=false) {
+ const messages=[], pending=[], prompts=[], decisions=[], speechRequests=[];let workflow=null,actions=[];
  const stamp=new Date().toISOString();
- const settings={provider_ready:true,provider_url:'http://localhost:11434/v1',model:'browser-test-fixture',roots:['/tmp'],name:'Owen',has_api_key:false,native_notifications:false,data_dir:'/tmp/voice-test',permissions_mode:permissionsMode,computer_access:'full',workflow_timeout:300,application_directories:[]};
+ const settings={provider_ready:true,provider_url:'http://localhost:11434/v1',model:'browser-test-fixture',roots:['/tmp'],name:'Owen',has_api_key:false,native_notifications:false,data_dir:'/tmp/voice-test',permissions_mode:permissionsMode,computer_access:'full',workflow_timeout:300,application_directories:[],speech_mode:'auto',speech_voice:'cedar',speech_available:neural,browser_mode:'existing',background_voice:true};
  await page.route('**/api/**',async route=>{
   const req=route.request(), path=new URL(req.url()).pathname.slice(4), method=req.method();
   let data;
+  if(path==='/speech'){speechRequests.push(req.postDataJSON());await route.fulfill({contentType:'audio/wav',body:audioFixture()});return;}
   if(path==='/status') data={ok:true,settings,drives:[],active:[]};
   else if(path==='/settings'){if(method==='PATCH')Object.assign(settings,req.postDataJSON());data=settings;}
   else if(path==='/conversations'&&method==='POST') data={id:'c1',title:'New conversation',created_at:stamp,updated_at:stamp};
@@ -54,7 +55,13 @@ async function installAPI(page, permissionsMode='autonomous') {
   else data=[];
   await route.fulfill({json:data});
  });
- return {prompts,decisions};
+ return {prompts,decisions,speechRequests};
+}
+function audioFixture(){
+ const rate=16000,seconds=2,samples=rate*seconds,buffer=Buffer.alloc(44+samples*2);
+ buffer.write('RIFF');buffer.writeUInt32LE(buffer.length-8,4);buffer.write('WAVEfmt ',8);buffer.writeUInt32LE(16,16);buffer.writeUInt16LE(1,20);buffer.writeUInt16LE(1,22);buffer.writeUInt32LE(rate,24);buffer.writeUInt32LE(rate*2,28);buffer.writeUInt16LE(2,32);buffer.writeUInt16LE(16,34);buffer.write('data',36);buffer.writeUInt32LE(samples*2,40);
+ for(let index=0;index<samples;index++)buffer.writeInt16LE(Math.round(Math.sin(index*2*Math.PI*220/rate)*4000),44+index*2);
+ return buffer;
 }
 const phase=(page,name)=>page.waitForFunction(name=>document.body.dataset.voicePhase===name,name);
 const words=(page,text)=>page.evaluate(text=>window.testMics.at(-1).words(text),text);
@@ -123,7 +130,7 @@ const navigate=async(page,view)=>{await page.locator('#menu-button').click();awa
   await words(page,'Stop listening');await phase(page,'off');assert.equal(api.prompts.length,3);
   await page.setViewportSize({width:1440,height:1000});await navigate(page,'settings');
   assert.equal(await page.locator('#permissions-mode').inputValue(),'autonomous');
-  await page.locator('#voice-select').selectOption('gb');await page.locator('#voice-rate').fill('1.1');await page.locator('#voice-rate').dispatchEvent('input');await page.locator('#voice-preview').click();
+  await page.locator('#voice-select').selectOption('gb');await page.locator('#voice-rate').fill('1.1');await page.locator('#voice-rate').dispatchEvent('input');const previousSamples=await page.evaluate(()=>window.testSpoken.length);await page.locator('#voice-preview').click();await page.waitForFunction(count=>window.testSpoken.length>count,previousSamples);
   assert.equal(await page.evaluate(()=>window.testSpoken.at(-1).voice.voiceURI),'gb');assert.equal(await page.evaluate(()=>window.testSpoken.at(-1).rate),1.1);await finish(page);
   await page.reload();await page.waitForFunction(()=>document.querySelector('#model-status').textContent.includes('browser-test-fixture'));assert.equal(await page.evaluate(()=>localStorage.getItem('jarvis-voice-uri')),'gb');assert.equal(await page.evaluate(()=>window.testMics.length),0);
   await home(page);await page.locator('#jarvis-hud').click();await phase(page,'listening');await page.evaluate(()=>window.testMics.at(-1).onerror({error:'not-allowed'}));await phase(page,'off');assert.match(await page.locator('#toast').textContent(),/access was denied/);await page.waitForTimeout(800);assert.equal(await page.evaluate(()=>window.testMics.length),1);
@@ -143,6 +150,25 @@ const navigate=async(page,view)=>{await page.locator('#menu-button').click();awa
   await review.locator('[data-decision="false"]').click();await phase(review,'speaking');assert.deepEqual(reviewAPI.decisions,[false]);await finish(review);await phase(review,'listening');
   await review.locator('#close-conversation').click();await home(review);await phase(review,'listening');
   await review.locator('#front-voice-stop').click();await phase(review,'off');assert.deepEqual(reviewErrors,[]);
-  console.log('Dashboard E2E passed: minimal circle/flow front page, hidden transcript during speech, transcript drawer without microphone interruption, front-page speech controls, autonomous requests without approval, optional routine approval pause/decline/resume, animated HUD, live connected graph on desktop/mobile, reduced motion, three spoken turns, UK voice selection, no self-echo, spoken stop, saved voice/rate, no auto-mic after reload, permission failure; no page errors.');
+  const natural=await browser.newPage({viewport:{width:1440,height:1000}}),naturalErrors=[];
+  natural.on('pageerror',error=>naturalErrors.push(error.message));
+  await installSpeech(natural);const naturalAPI=await installAPI(natural,'autonomous',true);
+  await natural.goto(process.env.JARVIS_TEST_URL || 'http://127.0.0.1:8765');await natural.waitForFunction(()=>document.querySelector('#model-status').textContent.includes('browser-test-fixture'));
+  await natural.locator('#jarvis-hud').click();await phase(natural,'listening');await words(natural,'Hello in your natural British voice');await phase(natural,'speaking');
+  await natural.waitForFunction(()=>document.querySelector('body').dataset.voicePhase==='speaking' && performance.getEntriesByType('resource').some(entry=>entry.name.includes('/api/speech')));
+  assert.equal(naturalAPI.speechRequests.length,1);assert.match(naturalAPI.speechRequests[0].text,/Good evening/);
+  assert.equal(await natural.evaluate(()=>window.testSpoken.length),0,'natural audio must replace browser synthesis');
+  assert.equal(await natural.evaluate(()=>window.testMics.at(-1).active),false,'microphone must pause throughout neural playback');
+  await phase(natural,'listening');await home(natural);
+  await words(natural,'Another reply');await phase(natural,'speaking');await natural.locator('#front-skip').click();await phase(natural,'listening');
+  await natural.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'));});
+  await phase(natural,'listening');assert.equal(await natural.evaluate(()=>window.testMics.at(-1).active),true);
+  await natural.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>false});document.dispatchEvent(new Event('visibilitychange'));});
+  await navigate(natural,'settings');await natural.locator('#background-voice').uncheck();await natural.locator('#settings-form button[type=submit]').click();await natural.waitForFunction(()=>document.querySelector('#settings-result').textContent==='Changes saved');
+  await navigate(natural,'chat');await phase(natural,'listening');
+  await natural.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'));});await phase(natural,'paused');
+  await natural.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>false});document.dispatchEvent(new Event('visibilitychange'));});await phase(natural,'listening');
+  await natural.locator('#front-voice-stop').click();await phase(natural,'off');assert.deepEqual(naturalErrors,[]);
+  console.log('Dashboard E2E passed: minimal circle/flow front page, hidden transcript during speech, transcript drawer without microphone interruption, front-page speech controls, autonomous requests without approval, optional routine approval pause/decline/resume, animated HUD, live connected graph on desktop/mobile, reduced motion, three spoken turns, UK voice selection, no self-echo, spoken stop, saved voice/rate, real blob audio playback and neural turn-taking, no auto-mic after reload, permission failure; no page errors.');
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

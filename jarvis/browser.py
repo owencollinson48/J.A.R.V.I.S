@@ -10,11 +10,14 @@ from .store import identifier
 
 
 class BrowserControl:
-    def __init__(self, settings, images):
+    def __init__(self, settings, images, desktop=None):
         self.settings, self.images = settings, images
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='jarvis-browser')
         self.playwright, self.context, self.page = None, None, None
         self.elements = {}
+        from .desktop import DesktopControl
+        from .existing_browser import ExistingBrowser
+        self.existing = ExistingBrowser(desktop or DesktopControl(images))
 
     def run(self, operation, args=None, preview=None, cancel=None):
         if cancel: cancel.check()
@@ -76,6 +79,9 @@ class BrowserControl:
 
     def _run(self, operation, args, preview, cancel):
         if cancel: cancel.check()
+        if platform.system()=='Windows' and self.settings.values.get('browser_mode','existing')=='existing':
+            if operation=='preflight': return self.existing.preflight(args)
+            return self.existing.act(args,preview or {},cancel)
         if operation == 'preflight' and args['action'] == 'navigate': return self._preflight(args)
         self._open()
         if cancel: cancel.check()
@@ -123,7 +129,7 @@ class BrowserControl:
             self.elements[args['element_id']].press(keys)
         else: raise ValueError('Unsupported browser action')
         if cancel: cancel.check()
-        return {'performed':action, 'observation':self.inspect()}
+        return {'performed':action, 'mode':'managed', 'observation':self.inspect()}
 
     def close(self):
         def close_owned():

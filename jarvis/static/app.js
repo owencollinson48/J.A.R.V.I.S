@@ -350,6 +350,12 @@ function populateSettings() {
   $('#native-notifications').checked = s.native_notifications;
   $('#permissions-mode').value = s.permissions_mode || 'autonomous';
   $('#computer-access').value = s.computer_access || 'full';
+  $('#browser-mode').value = s.browser_mode || 'existing';
+  $('#speech-mode').value = s.speech_mode || 'auto';
+  $('#background-voice').checked = s.background_voice !== false;
+  $('#speech-voice').value = s.speech_voice || 'cedar';
+  $('#speech-key').value = '';
+  $('#speech-key').placeholder = s.has_speech_api_key ? 'Key saved · leave blank to keep' : 'Uses your OpenAI chat key when available';
   $('#workflow-timeout').value = s.workflow_timeout || 300;
   $('#application-directories').value = (s.application_directories || []).join('\n');
   $('#storage-path').textContent = 'Local data: ' + s.data_dir;
@@ -360,15 +366,17 @@ function updateConnectionUI() {
   $('#model-status').textContent = s.provider_ready ? `${s.model} · Configured and ready to connect` : 'Your workspace is ready · Connect a model to chat';
   $('#model-light').classList.toggle('off', !s.provider_ready);
   $('#profile-name').textContent = s.name || 'Your workspace'; $('#profile-initial').textContent = (s.name || 'You')[0].toUpperCase();
+  populateVoiceChoices();
   $('#permission-note').textContent = s.permissions_mode === 'autonomous' ? 'Your request is approval. Available computer actions run automatically.' : s.permissions_mode === 'review' ? 'Computer actions wait for your review.' : 'Routine actions run automatically. Significant consequences ask first.';
 }
 async function saveSettings() {
-  const body = {provider_url:$('#provider-url').value.trim(), model:$('#provider-model').value.trim(), roots:$('#access-roots').value.split('\n').map(v => v.trim()).filter(Boolean), name:$('#user-name').value.trim(), native_notifications:$('#native-notifications').checked, permissions_mode:$('#permissions-mode').value, computer_access:$('#computer-access').value, workflow_timeout:Number($('#workflow-timeout').value), application_directories:$('#application-directories').value.split('\n').map(v => v.trim()).filter(Boolean)};
+  const body = {provider_url:$('#provider-url').value.trim(), model:$('#provider-model').value.trim(), roots:$('#access-roots').value.split('\n').map(v => v.trim()).filter(Boolean), name:$('#user-name').value.trim(), native_notifications:$('#native-notifications').checked, permissions_mode:$('#permissions-mode').value, computer_access:$('#computer-access').value, browser_mode:$('#browser-mode').value, speech_mode:$('#speech-mode').value, speech_voice:$('#speech-voice').value, background_voice:$('#background-voice').checked, workflow_timeout:Number($('#workflow-timeout').value), application_directories:$('#application-directories').value.split('\n').map(v => v.trim()).filter(Boolean)};
   if ($('#provider-key').value) body.api_key = $('#provider-key').value.trim();
+  if ($('#speech-key').value) body.speech_api_key = $('#speech-key').value.trim();
   state.settings = await patch('/settings', body); $('#provider-key').value = ''; updateConnectionUI(); populateSettings(); return state.settings;
 }
 $('#settings-form').onsubmit = async event => { event.preventDefault(); try { await saveSettings(); $('#settings-result').textContent = 'Changes saved'; toast('Your workspace is updated.'); } catch(e) { $('#settings-result').textContent = e.message; } };
-$('#preset-openai').onclick = () => { $('#provider-url').value = 'https://api.openai.com/v1'; $('#provider-model').value = 'gpt-4.1-mini'; };
+$('#preset-openai').onclick = () => { $('#provider-url').value = 'https://api.openai.com/v1'; $('#provider-model').value = 'gpt-6.1-sol'; };
 $('#clear-api-key').onclick = async () => { try { state.settings = await patch('/settings', {api_key:''}); populateSettings(); updateConnectionUI(); toast(state.settings.has_api_key ? 'Saved key removed. An environment key is still available.' : 'Saved key removed.'); } catch(e) { errorToast(e); } };
 $('#preset-ollama').onclick = () => { $('#provider-url').value = 'http://localhost:11434/v1'; $('#provider-model').value = 'qwen3:8b'; toast('Start Ollama and run: ollama pull qwen3:8b'); };
 $('#check-provider').onclick = async () => {
@@ -387,6 +395,7 @@ function notifyDue() {
   }
 }
 $('.composer-tools').insertAdjacentHTML('beforeend', `<button type="button" class="voice-mode" id="handsfree-toggle" aria-pressed="false">${icon('mic')}<span>Hands-free</span></button>`);
+const speechPlayer = new JarvisSpeech.SpeechPlayer({getSettings:()=>state.settings || {},onEnergy:level=>JarvisHUD.setSpeechEnergy(level)});
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 const replyVoice = () => JarvisVoice.chooseVoice(window.speechSynthesis?.getVoices() || [], localStorage.getItem('jarvis-voice-uri') || '');
 const replyRate = () => Math.min(1.25, Math.max(0.75, Number(localStorage.getItem('jarvis-voice-rate')) || 1));
@@ -399,11 +408,12 @@ voiceSession = new JarvisVoice.VoiceSession({
   makeRecognition: SpeechRecognition ? () => new SpeechRecognition() : null,
   synthesis: window.speechSynthesis,
   makeUtterance: window.SpeechSynthesisUtterance ? text => new SpeechSynthesisUtterance(text) : null,
+  speechPlayer,
   getVoice: replyVoice,
   getRate: replyRate,
   onCancel: () => requestCancellation(false),
   onBoundary: () => JarvisHUD.pulse(),
-  getBlocker: () => document.hidden || state.view !== 'chat' || $('#item-dialog').open ? 'paused' : state.busy ? 'thinking' : state.approvals.length ? 'approval' : null,
+  getBlocker: () => (document.hidden && state.settings?.background_voice === false) || state.view !== 'chat' || $('#item-dialog').open ? 'paused' : state.busy ? 'thinking' : state.approvals.length ? 'approval' : null,
   onTurn: text => sendMessage(text, {manageVoice:false}),
   onTranscript: text => { $('#voice-transcript').textContent = text || 'Speak naturally. I’ll reply, then listen again.'; },
   onError: toast,
@@ -459,12 +469,15 @@ function populateVoiceChoices() {
   const saved = localStorage.getItem('jarvis-voice-uri') || '';
   $('#voice-select').value = voices.some(v => (v.voiceURI || v.name) === saved) ? saved : '';
   const chosen = replyVoice();
-  $('#voice-hint').textContent = chosen ? `Reply voice: ${chosen.name} (${chosen.lang}).` : 'No British voice is available yet. Add an English (United Kingdom) speech voice in Windows Settings → Time & language → Speech, then restart your browser. The browser default may be used until then.';
+  const fallback = chosen ? `Installed fallback: ${chosen.name} (${chosen.lang}).` : 'Add an English (United Kingdom) speech voice in Windows Settings → Time & language → Speech for browser fallback.';
+  const natural = state.settings?.speech_mode !== 'browser' && state.settings?.speech_available;
+  $('#voice-hint').textContent = natural ? `Natural British voice: ${state.settings.speech_voice === 'marin' ? 'Marin' : 'Cedar'}. ${fallback}` : (state.settings?.speech_mode==='neural' ? 'Natural voice needs an OpenAI speech key. ' : '') + fallback;
   $('#voice-rate').value = replyRate(); $('#voice-rate-label').textContent = replyRate().toFixed(2) + '×';
 }
 $('#voice-select').onchange = () => { localStorage.setItem('jarvis-voice-uri', $('#voice-select').value); populateVoiceChoices(); };
 $('#voice-rate').oninput = () => { localStorage.setItem('jarvis-voice-rate', $('#voice-rate').value); $('#voice-rate-label').textContent = replyRate().toFixed(2) + '×'; };
-$('#voice-preview').onclick = () => voiceSession.speak('Good evening. I’m JARVIS, your personal assistant. What shall we work on together?').catch(errorToast);
+$('#voice-preview').onclick = async () => { try { state.settings=await patch('/settings',{speech_mode:$('#speech-mode').value,speech_voice:$('#speech-voice').value,background_voice:$('#background-voice').checked,...($('#speech-key').value.trim()?{speech_api_key:$('#speech-key').value.trim()}:{})}); $('#speech-key').value=''; populateVoiceChoices(); await voiceSession.speak('Good evening. I’m JARVIS, your personal assistant. What shall we work on together?'); } catch(error) { errorToast(error); } };
+$('#clear-speech-key').onclick = async () => { try { state.settings=await patch('/settings',{speech_api_key:''}); populateSettings(); toast('Saved speech key removed. An OpenAI chat or environment key may still provide natural speech.'); } catch(error) { errorToast(error); } };
 window.speechSynthesis?.addEventListener('voiceschanged', populateVoiceChoices);
 populateVoiceChoices(); voiceSession.status('off');
 function updateStopButton() { $('#emergency-stop').hidden = !(state.busy || state.active.length || state.approvals.length); }

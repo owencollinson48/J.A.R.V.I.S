@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import Response, FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -20,12 +20,18 @@ from .desktop import EmergencyHotkey
 from .execution import RunContext
 from .provider import Provider, ProviderError
 from .scheduler import Scheduler
+from .speech import Speech, SpeechError
 from .store import Store, now
 from .tools import ToolRunner
 
 
 class ChatRequest(BaseModel):
     content: str = Field(min_length=1, max_length=24000)
+
+
+class SpeechRequest(BaseModel):
+    text: str = Field(min_length=1,max_length=4000)
+    rate: float = Field(default=1,ge=.75,le=1.25,strict=True)
 
 
 class ApprovalRequest(BaseModel):
@@ -37,6 +43,7 @@ def create_app(data_dir=None, provider_factory=Provider):
     store = Store(settings.data_dir / "jarvis.db")
     computer = Computer(settings)
     provider = provider_factory(settings)
+    speech = Speech(settings)
     assistant = Assistant(store, settings, ToolRunner(store, computer), provider)
     services = assistant.tools
     emergency = EmergencyHotkey(assistant.cancel)
@@ -100,7 +107,7 @@ def create_app(data_dir=None, provider_factory=Provider):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
         return response
 
@@ -139,6 +146,22 @@ def create_app(data_dir=None, provider_factory=Provider):
         result = settings.update(body)
         retire_pending_reviews()
         return result
+
+    @app.post('/api/speech')
+    async def synthesize_speech(body: SpeechRequest, request: Request):
+        task = asyncio.create_task(speech.synthesize(body.text,body.rate))
+        try:
+            while not task.done():
+                await asyncio.wait({task},timeout=.1)
+                if await request.is_disconnected():
+                    task.cancel()
+                    return Response(status_code=499)
+            return Response(task.result(),media_type='audio/mpeg',headers={'Cache-Control':'no-store'})
+        except SpeechError as exc:
+            raise HTTPException(502,str(exc)) from exc
+        finally:
+            if not task.done(): task.cancel()
+            with contextlib.suppress(asyncio.CancelledError,SpeechError): await task
 
     @app.post("/api/provider/check")
     async def check_provider():
