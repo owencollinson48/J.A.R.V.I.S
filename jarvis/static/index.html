@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10151c">
+  <title>JARVIS · Personal intelligence</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="/" aria-label="JARVIS home"><span class="brand-symbol">J<span>·</span></span><span>JARVIS<small>PERSONAL INTELLIGENCE</small></span></a>
+      <button class="new-chat" id="new-chat"><span>＋</span> New conversation <kbd>N</kbd></button>
+      <p class="nav-label">WORKSPACE</p>
+      <nav aria-label="Main navigation">
+        <button class="nav-item active" data-view="chat"><span data-icon="chat"></span>Assistant<span class="nav-dot"></span></button>
+        <button class="nav-item" data-view="planner"><span data-icon="check"></span>My planner<span id="task-count" class="nav-count">0</span></button>
+        <button class="nav-item" data-view="files"><span data-icon="folder"></span>Computer</button>
+        <button class="nav-item" data-view="memory"><span data-icon="memory"></span>Memory</button>
+      </nav>
+      <div class="recent-heading"><p class="nav-label">RECENT CONVERSATIONS</p><span data-icon="clock"></span></div>
+      <div id="conversation-list" class="conversation-list"><p class="sidebar-empty">A fresh start. What’s on your mind?</p></div>
+      <div class="sidebar-bottom">
+        <div class="local-card"><span class="status-light"></span><div>Local workspace<small>Your memory stays on this device</small></div><span data-icon="shield"></span></div>
+        <button class="nav-item" data-view="settings"><span data-icon="settings"></span>Settings & connections</button>
+        <div class="profile"><div class="avatar" id="profile-initial">Y</div><div><strong id="profile-name">Your workspace</strong><small>Personal account</small></div><span class="version">v1.0</span></div>
+      </div>
+    </aside>
+
+    <div class="main-column">
+      <header class="topbar">
+        <div class="breadcrumbs"><button class="icon-button mobile-menu" id="menu-button" aria-label="Toggle navigation"><span data-icon="menu"></span></button><span class="crumb-icon" data-icon="grid"></span><span>Workspace</span><span class="slash">/</span><strong id="view-title">Assistant</strong></div>
+        <div class="topbar-right"><span class="local-badge"><span class="status-light"></span>LOCAL</span><span class="topbar-date" id="today-date"></span><button class="icon-button" id="notifications-button" aria-label="Show reminders"><span data-icon="bell"></span><i id="notification-dot" hidden></i></button></div>
+      </header>
+
+      <main id="chat-view" class="view chat-view">
+        <div class="chat-scroll" id="chat-scroll">
+          <div class="welcome" id="welcome">
+            <div class="eyebrow"><span class="short-line"></span> YOUR PERSONAL COMMAND CENTER</div>
+            <h1>A little more clarity.<br>A lot more <span>possibility.</span></h1>
+            <p class="welcome-description">Think out loud. Make a plan. Get things done.<br>I’m JARVIS, and I’m here to help you move forward.</p>
+            <div class="core-scene" aria-hidden="true"><div class="orbit orbit-outer"></div><div class="orbit orbit-middle"></div><div class="orbit orbit-inner"></div><div class="core-glow"></div><div class="core-center"><span>J</span></div><span class="orbit-marker marker-one"></span><span class="orbit-marker marker-two"></span><span class="core-coordinate coordinate-left">INTELLIGENCE<br>WITH INTENTION</span><span class="core-coordinate coordinate-right">READY WHEN<br>YOU ARE</span></div>
+            <div class="welcome-status"><span class="status-light" id="model-light"></span><span id="model-status">Checking your workspace</span></div>
+            <div class="suggestion-grid">
+              <button class="suggestion" data-prompt="Help me plan my day. Start by looking at my tasks and goals."><span class="suggestion-icon amber" data-icon="sun"></span><strong>Make room for what matters</strong><span>Let’s plan your day<span>↗</span></span></button>
+              <button class="suggestion" data-prompt="Help me find a file on my computer. Ask me what I'm looking for."><span class="suggestion-icon blue" data-icon="folder"></span><strong>A hand with your files</strong><span>Find, read, and organize<span>↗</span></span></button>
+              <button class="suggestion" data-prompt="I have a goal I want to work toward. Help me break it into a realistic plan."><span class="suggestion-icon green" data-icon="target"></span><strong>Turn an idea into a plan</strong><span>Small steps. Real progress.<span>↗</span></span></button>
+              <button class="suggestion" data-prompt="What do you remember about me and our past conversations?"><span class="suggestion-icon purple" data-icon="memory"></span><strong>Pick up where we left off</strong><span>A conversation that remembers<span>↗</span></span></button>
+            </div>
+          </div>
+          <div class="messages" id="messages" aria-live="polite"></div>
+          <div id="approval-list" class="approval-list"></div>
+        </div>
+        <div class="composer-area">
+          <div id="chat-error" class="inline-error" role="alert" hidden></div>
+          <div class="composer"><textarea id="chat-input" rows="1" placeholder="Ask anything. Let’s make it happen." aria-label="Message JARVIS"></textarea><div class="composer-bottom"><div class="composer-tools"><button class="icon-button" id="attach-button" title="Browse computer files" aria-label="Browse computer files"><span data-icon="plus"></span></button><span class="composer-divider"></span><button class="voice-mode" id="speak-toggle" aria-pressed="false"><span data-icon="volume"></span><span>Voice off</span></button></div><div class="composer-actions"><button class="icon-button" id="mic-button" aria-label="Dictate a message" title="Dictate a message"><span data-icon="mic"></span></button><button id="send-button" class="send-button" aria-label="Send message"><span data-icon="arrow"></span></button></div></div></div>
+          <p class="composer-note"><span data-icon="shield"></span> You’re in control. Computer changes always ask for your approval.<span class="enter-hint">Enter to send · Shift + Enter for a new line</span></p>
+        </div>
+      </main>
+
+      <main id="planner-view" class="view page-view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">A LITTLE STRUCTURE. MORE MOMENTUM.</div><h1>Your planner</h1><p>Keep the next step in sight.</p></div><button class="primary-button" id="add-planner">＋ Add an item</button></div>
+        <div class="planner-tabs"><button class="active" data-planner="tasks">Tasks <span id="planner-task-count">0</span></button><button data-planner="goals">Goals</button><button data-planner="reminders">Reminders</button></div>
+        <div id="planner-list" class="planner-list"></div>
+      </main>
+
+      <main id="files-view" class="view page-view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">CONNECTED TO YOUR WORLD</div><h1>Your computer</h1><p>Find a document. Open a folder. Start something.</p></div><button class="secondary-button" id="access-settings">Manage access <span>↗</span></button></div>
+        <div class="file-toolbar"><button class="icon-button" id="file-up" aria-label="Parent folder"><span data-icon="arrow-up"></span></button><input id="file-path" aria-label="Folder path" placeholder="Folder path"><button class="secondary-button" id="file-go">Go</button></div>
+        <div class="file-search"><span data-icon="search"></span><input id="file-search" placeholder="Search filenames in this folder…" aria-label="Search files"><button class="text-button" id="file-search-button">Search</button></div>
+        <div id="file-results" class="file-results"></div>
+        <div id="file-preview" class="file-preview" hidden><div class="section-heading"><h3 id="file-preview-title"></h3><button class="icon-button" id="close-preview" aria-label="Close preview">×</button></div><pre id="file-content"></pre><button class="primary-button" id="discuss-file">Ask JARVIS about this file <span>↗</span></button></div>
+      </main>
+
+      <main id="memory-view" class="view page-view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">CONTEXT THAT STAYS WITH YOU</div><h1>A little more personal</h1><p>Your preferences, your context, your memories. Always yours to edit.</p></div><button class="primary-button" id="add-memory">＋ Add a memory</button></div>
+        <div class="memory-banner"><span data-icon="memory"></span><div><strong>More than a fresh start, every time.</strong><p>Conversations are saved automatically. Keep useful facts here so JARVIS can carry them into your next chat.</p></div></div>
+        <div class="file-search"><span data-icon="search"></span><input id="memory-search" placeholder="Search memories and past conversations…" aria-label="Search memory"><button class="text-button" id="memory-search-button">Search</button></div>
+        <div class="section-heading"><h3>Saved memories</h3><span id="memory-count" class="muted"></span></div><div id="memory-list" class="memory-grid"></div><div id="memory-results"></div>
+      </main>
+
+      <main id="settings-view" class="view page-view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">MAKE YOURSELF AT HOME</div><h1>Your JARVIS, your way</h1><p>Connect your intelligence. Choose what’s within reach.</p></div></div>
+        <form id="settings-form">
+          <section class="settings-section"><div class="section-heading"><h2><span data-icon="sparkles"></span> Intelligence</h2><span class="pill" id="provider-pill">Not connected</span></div><p>Use an OpenAI-compatible provider, or keep inference on your computer with Ollama. Selected conversation context and tool results are sent to this provider.</p>
+          <div class="provider-presets"><button type="button" class="secondary-button" id="preset-openai">OpenAI</button><button type="button" class="secondary-button" id="preset-ollama">Ollama · local</button><button type="button" class="text-button" id="clear-api-key">Remove saved key</button></div>
+          <label>Provider base URL<input name="provider_url" id="provider-url" type="url" required placeholder="https://api.openai.com/v1"></label><div class="form-grid"><label>Model<input name="model" id="provider-model" required placeholder="gpt-4.1-mini"></label><label>API key<input name="api_key" id="provider-key" type="password" autocomplete="off" placeholder="Enter a key to connect"></label></div><p class="field-note">Keys stay in your local settings file, accessible to your Windows account. Leave blank to keep your saved key. Ollama needs no key.</p><button type="button" id="check-provider" class="secondary-button">Test connection <span>↗</span></button><span id="provider-result" role="status"></span></section>
+          <section class="settings-section"><h2><span data-icon="folder"></span> Computer access</h2><p>JARVIS can read within these folders. Add a drive such as C:\ to give it access across that drive. File edits, app launches, and commands ask for approval.</p><label>Allowed folders · one per line<textarea id="access-roots" rows="3" required spellcheck="false"></textarea></label><div id="drive-buttons" class="drive-buttons"></div><p class="field-note">Commands you approve run with your Windows account’s permissions. Folder limits apply to file tools, not programs you launch.</p></section>
+          <section class="settings-section"><h2><span data-icon="user"></span> Personal touches</h2><label>What should JARVIS call you?<input id="user-name" placeholder="Your name" maxlength="100"></label><label class="checkbox-label"><input type="checkbox" id="native-notifications"> Windows desktop reminders</label><button type="button" class="secondary-button" id="enable-notifications">Enable browser notifications</button><p class="field-note">Keep JARVIS running for reminders. Missed reminders appear the next time it starts.</p><div class="storage-note"><span data-icon="shield"></span><span id="storage-path"></span></div></section>
+          <div class="settings-footer"><span id="settings-result" role="status"></span><button type="submit" class="primary-button">Save changes <span>↗</span></button></div>
+        </form>
+      </main>
+    </div>
+
+    <aside class="right-panel" id="right-panel">
+      <div class="right-heading"><span>YOUR DAY, AT A GLANCE</span><span data-icon="sun"></span></div>
+      <div class="day-card"><span class="day-label" id="day-label">MONDAY</span><div class="day-date" id="day-date"></div><p>A little progress goes a long way.</p><div class="day-line"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div></div>
+      <section class="rail-section"><div class="section-heading"><h3>Up next</h3><button class="icon-button small" id="rail-add-task" aria-label="Add task">＋</button></div><div id="rail-tasks"></div><button class="rail-link" data-open-view="planner">Open planner <span>↗</span></button></section>
+      <section class="rail-section"><div class="section-heading"><h3>On your radar</h3><span data-icon="bell"></span></div><div id="rail-reminders"></div></section>
+      <section class="rail-section"><div class="section-heading"><h3>The bigger picture</h3><span data-icon="target"></span></div><div id="rail-goals"></div></section>
+      <div class="connection-card"><span class="connection-orb" data-icon="sparkles"></span><h4>Built around you.</h4><p>Connect a model to bring your personal assistant to life.</p><button class="rail-link" data-open-view="settings">Your connections <span>↗</span></button></div>
+      <div class="rail-footer"><span class="status-light"></span> A private space to think bigger.</div>
+    </aside>
+  </div>
+
+  <dialog id="item-dialog"><form id="item-form"><div class="section-heading"><h2 id="dialog-title">Add a task</h2><button class="icon-button" type="button" id="close-dialog" aria-label="Close dialog">×</button></div><label id="kind-label">Item type<select id="item-kind"><option value="tasks">Task</option><option value="goals">Goal</option><option value="reminders">Reminder</option><option value="memories">Memory</option></select></label><label><span id="item-text-label">Title</span><textarea id="item-text" rows="3" maxlength="4000" required placeholder="What would you like to work on?"></textarea></label><label id="item-details-label">Details<textarea id="item-details" rows="2" maxlength="12000" placeholder="A little more context…"></textarea></label><label id="item-due-label">When <span class="muted">· your local time</span><input id="item-due" type="datetime-local"></label><label id="item-goal-label">Goal<select id="item-goal"><option value="">No goal</option></select></label><p id="dialog-error" class="inline-error" role="alert" hidden></p><div class="dialog-footer"><button type="button" class="secondary-button" id="cancel-dialog">Cancel</button><button class="primary-button" type="submit">Save item <span>↗</span></button></div></form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
