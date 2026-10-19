@@ -203,6 +203,7 @@ def create_app(data_dir=None, provider_factory=Provider):
         workflow = store.row('SELECT * FROM workflows WHERE conversation_id=? ORDER BY created_at DESC LIMIT 1',(conversation_id,))
         return {"messages": store.history(conversation_id), "approvals": store.pending(conversation_id),
                 "visual":services.visuals.latest(conversation_id),
+                "task_checkpoint":services.checkpoints.latest(conversation_id),
                 "active": conversation_id in assistant.active,
                 'workflow':workflow, 'actions':store.rows('SELECT id,workflow_id,name,status,risk,created_at FROM action_log WHERE workflow_id=? ORDER BY created_at',(workflow['id'],)) if workflow else []}
 

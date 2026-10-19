@@ -43,6 +43,29 @@ def test_dashboard_tab_is_preserved_by_new_tab_navigation(opened):
     result=opened.browser.act(args,opened.browser.preflight(args))
     assert result['window_id']==8 and opened.keys[0]==('ctrl','t')
 
+
+def test_navigation_invalidates_previous_screenshot_before_returning_fresh_observation(opened):
+    invalidated=[]
+    opened.browser.desktop.invalidate_captures=invalidated.append
+    opened.browser.desktop.elements={'old':{'window_id':9},'other':{'window_id':8}}
+    args={'action':'navigate','url':'https://example.com'}
+    opened.browser.act(args,opened.browser.preflight(args))
+    assert invalidated==[9]
+    assert opened.browser.desktop.elements=={'other':{'window_id':8}}
+
+
+@pytest.mark.parametrize('action',['navigate','back'])
+def test_partially_delivered_browser_input_invalidates_previous_capture(opened,action):
+    invalidated=[]
+    opened.browser.desktop.invalidate_captures=invalidated.append
+    def fail(*args): raise OSError('Input stopped partway through')
+    if action=='navigate': opened.browser.type_url=fail
+    else: opened.browser.keys=fail
+    args={'action':action,**({'url':'https://example.com'} if action=='navigate' else {})}
+    with pytest.raises(OSError,match='partway'):
+        opened.browser.act(args,opened.browser.preflight(args))
+    assert invalidated==[9]
+
 def test_observed_controls_are_routed_to_same_browser_native_accessibility(opened):
     args={'action':'fill','element_id':'observed','text':'Requested text'}
     result=opened.browser.act(args,opened.browser.preflight(args))

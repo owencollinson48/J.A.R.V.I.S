@@ -65,6 +65,7 @@ def build_context(assistant, conversation_id, system, execution_modes):
     mode = settings.values['permissions_mode']
     details = {'local_time': datetime.now().astimezone().isoformat(), 'platform': platform.system(),
                'current_request': latest,
+               'active_task': assistant.tools.checkpoints.latest(conversation_id),
                'current_state_rule': 'Use fresh observations for this request. Old application status receipts and unrelated apps do not answer the current request. A user correction is not permission to repeat a stale claim.',
                'user_name': settings.values['name'], 'access_folders': settings.values['roots'],
                'permission_mode': mode, 'computer_access': 'full' if full_access else 'folders',
@@ -77,7 +78,7 @@ def build_context(assistant, conversation_id, system, execution_modes):
     observations = [index for index, message in enumerate(history) if index > current_start
                     and message['role'] == 'tool' and calls.get(message.get('tool_call_id')) in VOLATILE_TOOLS]
     retained = set(observations[-2:])
-    image_ids, bounded = [], []
+    image_ids, image_metadata, bounded = [], {}, []
     for index, message in enumerate(history):
         if (index < current_start and message['role'] == 'assistant' and not message.get('tool_calls')
                 and not historical_question and transient_status(message.get('content'))):
@@ -86,7 +87,10 @@ def build_context(assistant, conversation_id, system, execution_modes):
             if index > current_start:
                 try:
                     value = json.loads(message.get('content', '{}'))
-                    if isinstance(value, dict) and value.get('image_id'): image_ids.append(value['image_id'])
+                    if isinstance(value, dict) and value.get('image_id'):
+                        image_ids.append(value['image_id'])
+                        image_metadata[value['image_id']] = {key:value[key] for key in
+                            ('window_id','width','height','original_width','original_height','capture_offset') if key in value}
                 except (ValueError, TypeError): pass
             if index < current_start or (index in observations and index not in retained):
                 message = {**message, 'content': compact_result(message.get('content', ''))}
@@ -95,6 +99,11 @@ def build_context(assistant, conversation_id, system, execution_modes):
     for image_id in image_ids[-2:]:
         try:
             data = base64.b64encode(assistant.tools.images.path(image_id).read_bytes()).decode('ascii')
+            metadata = image_metadata.get(image_id,{})
+            caption = 'Screenshot image_id='+image_id+'; '+json.dumps(metadata)+'. '
+            caption += ('For native cursor input use this image_id and coordinate_space="preview", with x/y from this displayed image.'
+                        if metadata.get('window_id') else 'Managed browser screenshot; use current browser controls.')
+            images.append({'type':'text','text':caption})
             images.append({'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,'+data}})
         except (OSError, ValueError, TypeError): pass
     if images:

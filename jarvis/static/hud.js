@@ -76,7 +76,7 @@
   day.setAttribute('role','tabpanel');day.setAttribute('aria-labelledby','day-tab');flowPanel.setAttribute('aria-labelledby','flow-tab');rail.append(tabs,flowPanel,day);
   flowPanel.querySelector('[data-flow-activity]').onclick=()=>document.querySelector('[data-view="activity"]').click();
   let workflow=null,actions=[];
-  const statusText=status=>String(status||'pending').replaceAll('_',' ');
+  const statusText=status=>({awaiting_details:'Waiting for your details',ready_for_checkout:'Ready for you to check out'}[status]||String(status||'pending').replaceAll('_',' '));
   function box(root,title,subtitle,status,id,kind){
     const node=document.createElement('div');node.className='flow-node '+kind;node.dataset.status=status||'pending';if(id)node.dataset.actionId=id;
     const badge=document.createElement('span');badge.className='flow-node-icon';badge.textContent=kind==='flow-root'?'◈':status==='completed'?'✓':status==='failed'?'!':status==='awaiting_confirmation'?'Ⅱ':status==='cancelled'?'■':'◇';

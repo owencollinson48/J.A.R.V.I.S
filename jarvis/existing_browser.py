@@ -86,6 +86,8 @@ class ExistingBrowser:
 
     def invalidate_elements(self, window_id):
         # A new tab or replacement window must never inherit old page controls.
+        invalidate_captures = getattr(self.desktop,'invalidate_captures',None)
+        if invalidate_captures: invalidate_captures(window_id)
         elements = getattr(self.desktop,'elements',None)
         if isinstance(elements,dict):
             for token in list(elements):
@@ -225,13 +227,15 @@ class ExistingBrowser:
                 self.remember(window)
                 self.desktop.ensure_focus(self.window_id)
                 if cancel: cancel.check()
-                self.keys('ctrl','t') # Preserve the current tab, including the JARVIS dashboard.
-                self.keys('ctrl','l')
-                if cancel: cancel.check()
-                self.type_url(args['url'],cancel,self.window_id)
-                if cancel: cancel.check()
-                self.keys('enter')
-                self.invalidate_elements(self.window_id)
+                try:
+                    self.keys('ctrl','t') # Preserve the current tab, including the JARVIS dashboard.
+                    self.keys('ctrl','l')
+                    if cancel: cancel.check()
+                    self.type_url(args['url'],cancel,self.window_id)
+                    if cancel: cancel.check()
+                    self.keys('enter')
+                finally:
+                    self.invalidate_elements(self.window_id)
             else:
                 import webbrowser
                 if not webbrowser.open(args['url'],new=2): raise ValueError('Windows could not open the default browser')
@@ -309,8 +313,8 @@ class ExistingBrowser:
                 raise ValueError('Browser window changed identity; inspect again')
             self.desktop.ensure_focus(self.window_id)
             if cancel: cancel.check()
-            self.keys('alt','left')
-            self.invalidate_elements(self.window_id)
+            try: self.keys('alt','left')
+            finally: self.invalidate_elements(self.window_id)
         else:
             native={**args,'window_id':self.window_id,'action':'set_text' if action=='fill' else action}
             if action=='press_keys': native['keys']=args.get('keys','Enter').lower().replace('control+','ctrl+')

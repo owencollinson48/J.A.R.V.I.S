@@ -50,6 +50,19 @@ class DesktopControl:
         self.images = images
         self.lock = threading.RLock()
         self.elements = {}
+        self.captures = {}
+        self.latest_capture = {}
+
+    def invalidate_captures(self, window_id):
+        """An input can change content even when the window geometry stays fixed."""
+        with self.lock:
+            self.latest_capture.pop(window_id, None)
+
+    def mutating_input(self, window_id, operation, *args, **kwargs):
+        # Input libraries may raise after partially delivering input. In either
+        # case, prior pixels are no longer a reliable description of the page.
+        try: return operation(*args, **kwargs)
+        finally: self.invalidate_captures(window_id)
 
     @staticmethod
     def require_windows():
@@ -350,20 +363,21 @@ class DesktopControl:
             action = args['action']
             if cancel: cancel.check()
             if action == 'close':
-                wrapper.close()
+                self.mutating_input(item['id'], wrapper.close)
                 time.sleep(.2)
                 closed = not any(w['id'] == item['id'] for w in WindowsApplications.windows())
                 return {'closed': closed, 'window_id': item['id'], 'message': 'Closed' if closed else 'The app is still open; inspect for an unsaved-changes dialog.'}
             if action in {'click','double_click','right_click'}:
                 try:
                     if action != 'click': raise NotImplementedError
-                    control.invoke()
+                    self.mutating_input(item['id'], control.invoke)
                 except (AttributeError, NotImplementedError, NoPatternInterfaceError):
                     self.ensure_focus(item['id'])
                     import pyautogui
                     pyautogui.FAILSAFE = True
                     pyautogui.failSafeCheck()
-                    control.click_input(button='right' if action == 'right_click' else 'left', double=action == 'double_click')
+                    self.mutating_input(item['id'], control.click_input,
+                                        button='right' if action == 'right_click' else 'left', double=action == 'double_click')
             elif action == 'scroll':
                 direction, amount = self.scroll_arguments(args)
                 try:
@@ -374,7 +388,7 @@ class DesktopControl:
                     vertical = (1 if direction == 'up' else 4) if direction in {'up','down'} else 2
                     for _ in range(amount):
                         if cancel: cancel.check()
-                        pattern.Scroll(horizontal, vertical)
+                        self.mutating_input(item['id'], pattern.Scroll, horizontal, vertical)
                 except (AttributeError, NotImplementedError, NoPatternInterfaceError):
                     self.ensure_focus(item['id'])
                     import pyautogui
@@ -384,7 +398,7 @@ class DesktopControl:
                     x = max(rect.left, min((target.left + target.right) // 2, rect.right - 1))
                     y = max(rect.top, min((target.top + target.bottom) // 2, rect.bottom - 1))
                     if cancel: cancel.check()
-                    pyautogui.moveTo(x, y, duration=.1)
+                    self.mutating_input(item['id'], pyautogui.moveTo, x, y, duration=.1)
                     for _ in range(amount):
                         if cancel: cancel.check()
                         if direction in {'left','right'}:
@@ -395,13 +409,13 @@ class DesktopControl:
                                 wheel = ctypes.WinDLL('user32', use_last_error=True).mouse_event
                                 wheel.argtypes = [wintypes.DWORD] * 4 + [ctypes.c_size_t]
                                 wheel.restype = None
-                                wheel(0x1000, 0, 0, (120 if direction == 'right' else -120) & 0xffffffff, 0)
-                            else: pyautogui.hscroll(-1 if direction == 'left' else 1)
-                        else: pyautogui.scroll(1 if direction == 'up' else -1)
+                                self.mutating_input(item['id'], wheel, 0x1000, 0, 0, (120 if direction == 'right' else -120) & 0xffffffff, 0)
+                            else: self.mutating_input(item['id'], pyautogui.hscroll, -1 if direction == 'left' else 1)
+                        else: self.mutating_input(item['id'], pyautogui.scroll, 1 if direction == 'up' else -1)
             elif action == 'set_text':
                 text = args.get('text', '')
                 if len(text) > 12000: raise ValueError('Text entry is limited to 12,000 characters per step')
-                try: control.iface_value.SetValue(text)
+                try: self.mutating_input(item['id'], control.iface_value.SetValue, text)
                 except (AttributeError, NotImplementedError, NoPatternInterfaceError):
                     self.ensure_focus(item['id'])
                     control.set_focus()
@@ -412,39 +426,41 @@ class DesktopControl:
                     if cancel: cancel.check()
                     # SetValue replaces the field. Preserve that contract for controls
                     # such as document editors that expose no UIA ValuePattern.
-                    send_keys('^a', pause=.001)
+                    self.mutating_input(item['id'], send_keys, '^a', pause=.001)
                     if not text:
                         if cancel: cancel.check()
                         pyautogui.failSafeCheck()
-                        send_keys('{BACKSPACE}', pause=.001)
+                        self.mutating_input(item['id'], send_keys, '{BACKSPACE}', pause=.001)
                     # Escape SendKeys syntax; user text must never become hotkeys.
                     for offset in range(0,len(text),80):
                         pyautogui.failSafeCheck()
                         if cancel: cancel.check()
                         escaped = ''.join('{' + c + '}' if c in '{}+^%()~' else c for c in text[offset:offset+80])
-                        send_keys(escaped, with_spaces=True, with_newlines=True, pause=.001)
+                        self.mutating_input(item['id'], send_keys, escaped, with_spaces=True, with_newlines=True, pause=.001)
             elif action == 'press_keys':
                 self.ensure_focus(item['id'])
                 import pyautogui
                 pyautogui.FAILSAFE = True
                 keys = args.get('keys','').lower().replace(' ', '').split('+')
                 if not keys or any(key not in pyautogui.KEYBOARD_KEYS for key in keys): raise ValueError('Unsupported keyboard keys')
-                pyautogui.hotkey(*keys)
+                self.mutating_input(item['id'], pyautogui.hotkey, *keys)
             else: raise ValueError('Unsupported desktop action')
             if cancel: cancel.check()
             observed = self.inspect(item['id'], cancel)
             return {'performed': action, 'window_id': item['id'], 'observation': observed,
                     'note': 'The input was delivered. Verify the intended result in the returned UI or a screenshot.'}
 
-    def native_observation(self, result, window_id, cancel):
+    def native_observation(self, result, window_id, cancel, force_screenshot=False):
         if cancel: cancel.check()
+        observed = None
         try:
             observed = self.inspect(window_id, cancel)
             result['observation'] = observed
-            if observed.get('accessibility', {}).get('available') is False:
-                result.update(self.screenshot(window_id, cancel))
         except (ValueError, OSError) as exc:
             result['observation_error'] = str(exc)[:1000]
+        if force_screenshot or (observed or {}).get('accessibility', {}).get('available') is False:
+            try: result.update(self.screenshot(window_id, cancel))
+            except (ValueError, OSError) as exc: result['observation_error'] = str(exc)[:1000]
         result['verified'] = False
         result['note'] = 'Input delivered. Verify the requested result in the returned UI or screenshot. If observation failed, observe again without repeating the input.'
         return result
@@ -469,7 +485,7 @@ class DesktopControl:
                     import pyautogui
                     pyautogui.FAILSAFE = True
                     pyautogui.failSafeCheck()
-                    pyautogui.press('f11')
+                    self.mutating_input(item['id'], pyautogui.press, 'f11')
                     deadline = time.monotonic()+2
                     while time.monotonic()<deadline:
                         if cancel: cancel.check()
@@ -479,7 +495,7 @@ class DesktopControl:
                 state = WindowsApplications.window_state(item['id'])
                 return {'performed': action, 'verified': state['fullscreen'], **state}
             if cancel: cancel.check()
-            return WindowsApplications.size_window(item['id'], action)
+            return self.mutating_input(item['id'], WindowsApplications.size_window, item['id'], action)
         import pyautogui
         pyautogui.FAILSAFE = True
         # Import may establish process DPI awareness, so read bounds afterwards.
@@ -495,15 +511,15 @@ class DesktopControl:
             text = args.get('text')
             if not isinstance(text, str) or not text or len(text) > 12000:
                 raise ValueError('Native text entry requires 1 to 12,000 characters. Click the observed field first.')
-            send_unicode_text(text, cancel, item['id'], safety_check=pyautogui.failSafeCheck)
+            self.mutating_input(item['id'], send_unicode_text, text, cancel, item['id'], safety_check=pyautogui.failSafeCheck)
         elif action == 'press_keys':
             keys = args.get('keys','').lower().replace(' ', '').split('+')
             if not keys or any(key not in pyautogui.KEYBOARD_KEYS for key in keys): raise ValueError('Unsupported keyboard keys')
-            pyautogui.hotkey(*keys)
+            self.mutating_input(item['id'], pyautogui.hotkey, *keys)
         elif action == 'scroll':
             direction, amount = self.scroll_arguments(args)
             left, top, right, bottom = after['bounds']
-            pyautogui.moveTo((left+right)//2, (top+bottom)//2, duration=.1)
+            self.mutating_input(item['id'], pyautogui.moveTo, (left+right)//2, (top+bottom)//2, duration=.1)
             for _ in range(amount):
                 if cancel: cancel.check()
                 pyautogui.failSafeCheck()
@@ -512,9 +528,9 @@ class DesktopControl:
                         from ctypes import wintypes
                         wheel = ctypes.WinDLL('user32', use_last_error=True).mouse_event
                         wheel.argtypes = [wintypes.DWORD]*4 + [ctypes.c_size_t]
-                        wheel(0x1000, 0, 0, (120 if direction == 'right' else -120) & 0xffffffff, 0)
-                    else: pyautogui.hscroll(-1 if direction == 'left' else 1)
-                else: pyautogui.scroll(1 if direction == 'up' else -1)
+                        self.mutating_input(item['id'], wheel, 0x1000, 0, 0, (120 if direction == 'right' else -120) & 0xffffffff, 0)
+                    else: self.mutating_input(item['id'], pyautogui.hscroll, -1 if direction == 'left' else 1)
+                else: self.mutating_input(item['id'], pyautogui.scroll, 1 if direction == 'up' else -1)
         else: raise ValueError('Unsupported native window action')
         return self.native_observation({'performed': action, 'window_id': item['id']}, item['id'], cancel)
 
@@ -554,10 +570,31 @@ class DesktopControl:
                 image, offset = self.capture_visible_window(item, cancel)
                 method = 'visible_screen'
             if cancel: cancel.check()
-            return {**self.images.save(image), 'window_id': item['id'], 'title': item['title'], 'bounds': item['bounds'],
+            # Visible-screen recovery can focus an app whose client area is still
+            # settling. Bind the saved pixels to the geometry that produced them.
+            current = self.native_window(window_id)
+            rect = self.capture_client_rect(window_id, current['bounds'])
+            if (item['pid'], item['bounds']) != (current['pid'], current['bounds']) or current['minimized']:
+                raise ValueError('The window changed during capture. Inspect and capture it again.')
+            if (rect[0]-current['bounds'][0], rect[1]-current['bounds'][1]) != tuple(offset) or image.size != (rect[2]-rect[0], rect[3]-rect[1]):
+                raise ValueError('The window client area changed during capture. Inspect and capture it again.')
+            if cancel: cancel.check()
+            saved = self.images.save(image)
+            record = {'window_id': window_id, 'pid': current['pid'], 'bounds': list(current['bounds']),
+                      'client_rect': tuple(rect), 'capture_offset': list(offset),
+                      'original_width': saved['original_width'], 'original_height': saved['original_height'],
+                      'width': saved['width'], 'height': saved['height'], 'time': time.monotonic()}
+            self.captures[saved['image_id']] = record
+            self.latest_capture[window_id] = saved['image_id']
+            while len(self.captures) > 80:
+                expired = next(iter(self.captures))
+                removed = self.captures.pop(expired)
+                if self.latest_capture.get(removed['window_id']) == expired:
+                    self.latest_capture.pop(removed['window_id'], None)
+            return {**saved, 'window_id': item['id'], 'title': item['title'], 'bounds': item['bounds'],
                     'capture_offset': offset, 'capture_method': method,
                     **({'capture_recovery': capture_error or 'The window drawing surface returned black or empty pixels.'} if method == 'visible_screen' else {}),
-                    'coordinate_note': 'The image contains the window client area. desktop_pointer uses outer-window pixels: x = preview_x * original_width/width + capture_offset[0]; y = preview_y * original_height/height + capture_offset[1].'}
+                    'coordinate_note': 'The image contains the window client area. Prefer desktop_pointer with this image_id, coordinate_space="preview", and integer x/y directly from the displayed image. coordinate_space="image" uses original client pixels. Legacy coordinate_space="window" uses outer-window pixels: x = preview_x * original_width/width + capture_offset[0]; y = preview_y * original_height/height + capture_offset[1]. Capture again after navigation or a changed window.'}
 
     @staticmethod
     def scroll_arguments(args):
@@ -580,27 +617,67 @@ class DesktopControl:
         if not hit or window_id not in {int(user32.GetAncestor(hit, 2) or 0), int(user32.GetAncestor(hit, 3) or 0)}:
             raise ValueError('The requested point is covered by another window. Observe the requested window again before clicking.')
 
-    def pointer(self, window_id, x, y, cancel=None, action='click'):
+    def pointer_capture(self, window_id, image_id, item):
+        record = self.captures.get(image_id) if isinstance(image_id, str) else None
+        if (not record or record['window_id'] != window_id or
+                self.latest_capture.get(window_id) != image_id or time.monotonic()-record['time'] > 60):
+            raise ValueError('The screenshot is stale or belongs to another window. Capture the requested window again before pointer input.')
+        if (record['pid'] != item['pid'] or record['bounds'] != item['bounds'] or item['minimized'] or
+                record['client_rect'] != self.capture_client_rect(window_id, item['bounds'])):
+            raise ValueError('The screenshot window or client geometry changed. Capture the requested window again before pointer input.')
+        return record
+
+    def pointer(self, window_id, x, y, cancel=None, action='click', image_id=None, coordinate_space='window'):
         with self.lock:
             if cancel: cancel.check()
-            if action not in {'click','double_click','right_click'}: raise ValueError('Unsupported pointer action')
+            if action not in {'click','double_click','right_click','move'}: raise ValueError('Unsupported pointer action')
+            if coordinate_space not in {'window','preview','image'}:
+                raise ValueError('Pointer coordinate_space must be window, preview, or image')
+            if coordinate_space != 'window' and image_id is None:
+                raise ValueError('Preview or image coordinates require the current screenshot image_id')
+            if type(x) is not int or type(y) is not int:
+                raise ValueError('Coordinates must be integers inside the requested window or screenshot')
             import pyautogui
             pyautogui.FAILSAFE = True
             item = self.native_window(window_id)
             left, top, right, bottom = item['bounds']
-            if type(x) is not int or type(y) is not int or not (0 <= x < right-left and 0 <= y < bottom-top):
+            record = self.pointer_capture(window_id, image_id, item) if image_id is not None else None
+            if record and coordinate_space != 'window':
+                width, height = ((record['width'], record['height']) if coordinate_space == 'preview' else
+                                 (record['original_width'], record['original_height']))
+                if not (0 <= x < width and 0 <= y < height):
+                    raise ValueError('Coordinates must be integers inside the referenced screenshot')
+                if coordinate_space == 'preview':
+                    x, y = x*record['original_width']//width, y*record['original_height']//height
+                x, y = x+record['capture_offset'][0], y+record['capture_offset'][1]
+            if not (0 <= x < right-left and 0 <= y < bottom-top):
                 raise ValueError('Coordinates must be integers inside the requested window')
+            if record and not (record['client_rect'][0] <= left+x < record['client_rect'][2] and
+                               record['client_rect'][1] <= top+y < record['client_rect'][3]):
+                raise ValueError('Coordinates must be inside the referenced screenshot client area')
             self.ensure_focus(item['id'])
+            def check_target():
+                if cancel: cancel.check()
+                current = self.native_window(window_id)
+                if (item['pid'], item['bounds']) != (current['pid'], current['bounds']) or current['minimized']:
+                    raise ValueError('The window changed before pointer input. Capture it again before clicking.')
+                if image_id is not None: self.pointer_capture(window_id, image_id, current)
+                if WindowsApplications.foreground_window() != window_id:
+                    raise ValueError('The requested window lost foreground focus. Observe it again before pointer input.')
+                self.ensure_pointer_target(item['id'], left+x, top+y)
+                pyautogui.failSafeCheck()
+            check_target()
+            try:
+                pyautogui.moveTo(left+x, top+y, duration=.12)
+                check_target()
+                if action != 'move':
+                    pyautogui.click(left+x, top+y, button='right' if action == 'right_click' else 'left',
+                                    clicks=2 if action == 'double_click' else 1, interval=.1 if action == 'double_click' else 0)
+            finally:
+                self.invalidate_captures(window_id)
             if cancel: cancel.check()
-            after = self.native_window(window_id)
-            if (item['pid'], item['bounds']) != (after['pid'], after['bounds']):
-                raise ValueError('The window changed while focusing. Capture it again before clicking.')
-            self.ensure_pointer_target(item['id'], left+x, top+y)
-            pyautogui.failSafeCheck()
-            pyautogui.click(left + x, top + y, button='right' if action == 'right_click' else 'left',
-                            clicks=2 if action == 'double_click' else 1, interval=.1 if action == 'double_click' else 0)
-            if cancel: cancel.check()
-            return self.native_observation({'clicked': True, 'performed':action, 'window_id': item['id']}, item['id'], cancel)
+            return self.native_observation({'clicked': action != 'move', 'moved': True, 'performed':action,
+                                            'window_id': item['id']}, item['id'], cancel, force_screenshot=True)
 
     def search_outlook(self, query='', limit=10, cancel=None):
         self.require_windows()

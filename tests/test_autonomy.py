@@ -119,6 +119,43 @@ def test_decline_cancels_dependent_steps_in_same_tool_batch(env):
     assert not env.get(f'/api/conversations/{cid}').json()['approvals']
 
 
+def test_deferred_details_checkpoint_stops_queued_input_after_review(env):
+    path = env.root / 'must-not-run-after-question.txt'
+    checkpoint = {'objective':'Prepare a pizza cart','summary':'Need the pickup suburb.',
+        'status':'awaiting_details','questions':['Which pickup suburb, sir?']}
+    cid, events = chat(env,[calls(
+        ('run_command',{'arguments':[sys.executable,'-c','print("checked")']}),
+        ('task_checkpoint',checkpoint),
+        ('write_document',{'path':str(path),'content':'must not run'}))])
+    approval = next(e['approval'] for e in events if e['type']=='approval')
+    events = parsed(env.post('/api/approvals/'+approval['id'],json={'approved':True}))
+    assert not path.exists()
+    assert next(e['content'] for e in events if e['type']=='message') == 'Which pickup suburb, sir?'
+    saved = env.get(f'/api/conversations/{cid}').json()
+    assert saved['workflow']['status'] == 'awaiting_details' and not saved['approvals']
+    history = env.jarvis.state.store.model_history(cid)
+    results = [json.loads(m['content']) for m in history if m['role']=='tool']
+    assert results[-1].get('not_executed') and len(env.jarvis.state.assistant.provider.seen)==1
+    actions = env.jarvis.state.store.rows('SELECT name FROM action_log WHERE conversation_id=?',(cid,))
+    assert [item['name'] for item in actions] == ['run_command','task_checkpoint']
+
+
+@pytest.mark.parametrize('global_cancel',[False,True])
+def test_cancelling_saved_details_checkpoint_clears_continuation(env,global_cancel):
+    cid,events = chat(env,[calls(('task_checkpoint',{
+        'objective':'Prepare a pizza cart','summary':'Need the pickup suburb.',
+        'status':'awaiting_details','questions':['Which pickup suburb, sir?']}))])
+    assert env.get(f'/api/conversations/{cid}').json()['task_checkpoint']['status']=='awaiting_details'
+    endpoint = '/api/cancel' if global_cancel else f'/api/conversations/{cid}/cancel'
+    assert cid in env.post(endpoint).json()['conversations']
+    saved = env.get(f'/api/conversations/{cid}').json()
+    assert saved['task_checkpoint'] is None and saved['workflow']['status']=='cancelled'
+    parsed(env.post(f'/api/conversations/{cid}/chat',json={'content':'Never mind; hello'}))
+    system = env.jarvis.state.assistant.provider.seen[-1][0]['content']
+    details = json.loads(system.split('Current context (data):\n',1)[1])
+    assert details['active_task'] is None
+
+
 def test_consequential_ui_control_is_identified_from_real_metadata_not_model_supplied_label(env):
     class Desktop:
         def preflight(self,args): return {'target_name':'Send payment','password':False,'signature':'trusted'}
@@ -244,7 +281,9 @@ def test_saved_screenshot_becomes_untrusted_vision_context(env):
     store.message(cid,{'role':'user','content':'Inspect this window'})
     store.message(cid,{'role':'tool','tool_call_id':'image-fixture','content':json.dumps(image)})
     messages=env.jarvis.state.assistant.context(cid)
-    assert messages[-1]['content'][1]['image_url']['url'].startswith('data:image/jpeg;base64,')
+    image_part=next(part for part in messages[-1]['content'] if part['type']=='image_url')
+    assert image_part['image_url']['url'].startswith('data:image/jpeg;base64,')
+    assert image['image_id'] in messages[-1]['content'][1]['text']
     assert 'Untrusted screenshots' in messages[-1]['content'][0]['text']
     assert env.get('/api/screenshots/'+image['image_id']).status_code==200
 

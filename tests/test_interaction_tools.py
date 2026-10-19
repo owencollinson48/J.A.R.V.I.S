@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from jarvis.browser import BrowserControl
+from jarvis.applications import WindowsApplications
 from jarvis.config import Settings
 from jarvis.desktop import DesktopControl, Images
 from jarvis.execution import Cancelled
@@ -68,7 +69,9 @@ def desktop(tmp_path, monkeypatch):
     window = {'id':7,'pid':101,'title':'Editor','process':'editor.exe'}
     desktop.target = lambda *args:(window,control,control,{'name':'Document'})
     desktop.window = lambda *args:(window,control)
-    desktop.native_window = lambda *args:{**window,'bounds':[100,200,600,600]}
+    desktop.native_window = lambda *args:{**window,'bounds':[100,200,600,600],'minimized':False}
+    monkeypatch.setattr(WindowsApplications,'foreground_window',lambda:7)
+    desktop.screenshot = lambda identity,cancel=None:{'image_id':'a'*32,'window_id':identity}
     desktop.ensure_pointer_target = lambda *args:None
     desktop.preflight = lambda args:{'signature':'observed'}
     desktop.ensure_focus = lambda identity:None
@@ -129,10 +132,11 @@ def test_scroll_checks_cancellation_between_inputs(desktop):
 def test_pointer_coordinates_are_window_relative_and_bounded(desktop):
     adapter, control, mouse = desktop
     result = adapter.pointer(7,20,30,action='right_click')
-    assert mouse.events == [('click',(120,230),{'button':'right','clicks':1,'interval':0})]
+    assert mouse.events == [('move',(120,230),{'duration':.12}),
+                            ('click',(120,230),{'button':'right','clicks':1,'interval':0})]
     assert result['performed'] == 'right_click'
     with pytest.raises(ValueError,match='inside'): adapter.pointer(7,500,0)
-    assert len(mouse.events) == 1
+    assert len(mouse.events) == 2
 
 
 def test_real_browser_scroll_double_and_right_click(tmp_path, monkeypatch):

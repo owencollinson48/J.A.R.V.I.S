@@ -51,9 +51,12 @@ def test_current_request_keeps_latest_observations_and_vision_without_stale_ids(
     app = create_app(tmp_path/'private'); store = app.state.store
     cid = store.conversation()['id']
     store.message(cid, {'role': 'user', 'content': 'Inspect and finish the current browser task'})
+    captures = []
     for index in range(3):
         image = app.state.tools.images.save(Image.new('RGB', (80, 80), 'blue'))
-        tool(store, cid, f'call-{index}', 'browser_action', {**image, 'elements': [
+        captures.append(image['image_id'])
+        tool(store, cid, f'call-{index}', 'browser_action', {**image, 'window_id':10+index,
+            'original_width':160,'original_height':160,'capture_offset':{'x':8,'y':30},'elements': [
             {'id': f'control-{index}', 'name': 'Current field '+str(index)}]})
     messages = context(app, cid)
     results = [json.loads(message['content']) for message in messages if message['role'] == 'tool']
@@ -64,6 +67,13 @@ def test_current_request_keeps_latest_observations_and_vision_without_stale_ids(
               for item in message['content'] if item['type'] == 'image_url']
     assert len(images) == 2 and all(item['image_url']['url'].startswith('data:image/jpeg;base64,') for item in images)
     assert 'Untrusted screenshots' in messages[-1]['content'][0]['text']
+    parts = messages[-1]['content']
+    assert [part['type'] for part in parts] == ['text','text','image_url','text','image_url']
+    for index, offset in ((1,1),(2,3)):
+        caption = parts[offset]['text']
+        assert captures[index] in caption and f'"window_id": {10+index}' in caption
+        assert '"original_width": 160' in caption and 'coordinate_space="preview"' in caption
+    assert captures[0] not in str(parts)
     # Every model tool call still has its corresponding result after compaction.
     calls = [call['id'] for message in messages for call in message.get('tool_calls', [])]
     assert calls == [message['tool_call_id'] for message in messages if message['role'] == 'tool']

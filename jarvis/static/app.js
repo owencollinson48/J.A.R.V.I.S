@@ -29,7 +29,7 @@ hydrateIcons();
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const state = {view:'chat', conversation:null, conversations:[], tasks:[], goals:[], reminders:[], memories:[], settings:null, busy:false, planner:'tasks', approvals:[], currentPath:'', previewPath:'', editing:null, speaking:localStorage.getItem('jarvis-speak') === 'true', notified:new Set(), refreshing:false};
 let voiceSession = null;
-Object.assign(state, {active:[], workflow:null, flowActions:[], applications:[], appRequest:0, visual:null});
+Object.assign(state, {active:[], workflow:null, flowActions:[], applications:[], appRequest:0, visual:null, taskCheckpoint:null});
 let toastTimer;
 function toast(text) { $('#toast').textContent = text; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 4200); }
 async function api(path, options = {}) {
@@ -125,6 +125,7 @@ function newChat() {
   voiceSession?.stop();
   state.conversation = null; state.approvals = []; localStorage.removeItem('jarvis-conversation');
   showVisual(null);
+  state.taskCheckpoint = null;
   state.workflow = null; state.flowActions = []; renderWorkflow();
   $('#messages').innerHTML = ''; $('#approval-list').innerHTML = ''; $('#welcome').hidden = false; $('#chat-error').hidden = true;
   renderConversations(); showView('chat'); setConversationOpen(false);
@@ -150,6 +151,7 @@ async function loadConversation(id, force = false) {
   const history = await api('/conversations/' + id);
   state.conversation = id; localStorage.setItem('jarvis-conversation', id); state.approvals = history.approvals;
   showVisual(history.visual);
+  state.taskCheckpoint = history.task_checkpoint || null;
   state.workflow = history.workflow || null; state.flowActions = history.actions || []; renderWorkflow();
   $('#messages').innerHTML = ''; $('#welcome').hidden = voiceSession?.enabled || history.messages.some(m => ['user','assistant'].includes(m.role) && m.content);
   history.messages.filter(m => ['user','assistant'].includes(m.role) && m.content).forEach(m => appendMessage(m.role, m.content));
@@ -193,6 +195,7 @@ async function stream(path, body) {
         if (event.type === 'workflow') { if(state.workflow?.id !== event.id) state.flowActions = []; state.workflow = {id:event.id,status:event.status,request:body.content || 'Continuing your task',plan:[]}; state.active = [state.conversation]; renderWorkflow(); updateStopButton(); }
         if (event.type === 'plan') { state.workflow = {...state.workflow,detail:event.outcome,plan:event.steps}; renderWorkflow(); $('#workflow-card').open = true; }
         if (event.type === 'visual') { showVisual(event.visual); }
+        if (event.type === 'checkpoint') { state.taskCheckpoint = event.checkpoint; }
         if (event.type === 'action') { const update=event.action; const index=state.flowActions.findIndex(action=>action.id===update.id); if(index<0) state.flowActions.push(update); else state.flowActions[index]={...state.flowActions[index],...update}; renderWorkflow(); }
         if (event.type === 'tool') { const action=state.flowActions.find(action=>action.id===event.action_id); if(action) action.status=event.status || (event.ok?'completed':'failed'); renderWorkflow(); showWorking(event.ok ? `${event.name.replaceAll('_',' ')} · done` : `${event.name.replaceAll('_',' ')} · not completed`); }
         if (event.type === 'approval') { state.approvals.push(event.approval); renderApprovals(); scrollChat(); }

@@ -23,7 +23,7 @@ def native(tmp_path,monkeypatch):
            'sizes':[],'events':[],'captures':[],'uia_calls':0,'fail_safe':False,'on_focus':None,
            'unicode_callbacks':[],'point_hit':171,'point_root':71,'point_owner':71,'points':[],
            'capture_offset':[0,0],'client_size':[2000,1200],
-           'screen_bounds':[-2560,0,3840,2160],'point_callback':None,'point_ancestors':{}}
+           'screen_bounds':[-2560,0,3840,2160],'point_callback':None,'point_ancestors':{},'on_move':None}
     desktop=DesktopControl(Images(tmp_path))
     monkeypatch.setattr(desktop,'require_windows',lambda:None)
     monkeypatch.setattr(WindowsApplications,'windows',lambda:[dict(state['window'])] if state['visible'] else [])
@@ -91,7 +91,10 @@ def native(tmp_path,monkeypatch):
     def event(name,*args,**kwargs):
         fail_safe();state['events'].append((name,args,kwargs))
     mouse.click=lambda *args,**kwargs:event('click',*args,**kwargs)
-    mouse.moveTo=lambda *args,**kwargs:event('move',*args,**kwargs)
+    def move(*args,**kwargs):
+        event('move',*args,**kwargs)
+        if state['on_move']: state['on_move']()
+    mouse.moveTo=move
     mouse.scroll=lambda *args,**kwargs:event('scroll',*args,**kwargs)
     mouse.hscroll=lambda *args,**kwargs:event('hscroll',*args,**kwargs)
     mouse.hotkey=lambda *args,**kwargs:event('hotkey',*args,**kwargs)
@@ -149,6 +152,204 @@ def test_screenshot_client_offset_and_preview_scale_map_to_outer_window_pointer_
     y=int(80*capture['original_height']/capture['height']+capture['capture_offset'][1])
     desktop.pointer(71,x,y)
     assert ('click',(208,331),{'button':'left','clicks':1,'interval':0}) in state['events']
+
+
+@pytest.mark.parametrize('space,x,y',[('preview',80,80),('image',100,100),('window',108,131)])
+def test_referenced_pointer_translates_client_preview_and_negative_monitor_coordinates(native,space,x,y):
+    desktop,state,_,_=native
+    state.update(bounds=[-2400,200,-280,1450],capture_offset=[8,31])
+    capture=desktop.screenshot(71)
+    assert 'coordinate_space="preview"' in capture['coordinate_note']
+    result=desktop.pointer(71,x,y,image_id=capture['image_id'],coordinate_space=space)
+    assert state['events']==[('move',(-2292,331),{'duration':.12}),
+                             ('click',(-2292,331),{'button':'left','clicks':1,'interval':0})]
+    assert result['moved'] and result['clicked'] and result['verified'] is False
+    assert result['image_id']!=capture['image_id'],'each coordinate input must return a fresh screenshot'
+    assert desktop.latest_capture[71]==result['image_id']
+
+
+def test_referenced_pointer_can_move_cursor_without_clicking(native):
+    desktop,state,_,_=native
+    capture=desktop.screenshot(71)
+    result=desktop.pointer(71,80,80,action='move',image_id=capture['image_id'],coordinate_space='preview')
+    assert state['events']==[('move',(200,300),{'duration':.12})]
+    assert result['performed']=='move' and result['moved'] is True and result['clicked'] is False
+    assert result['image_id']!=capture['image_id']
+
+
+@pytest.mark.parametrize('change',['pid','bounds','client_size','capture_offset','minimized','expired','unknown','older','window'])
+def test_referenced_screenshot_rejects_stale_or_wrong_window_before_focus_or_motion(native,change):
+    desktop,state,_,_=native
+    capture=desktop.screenshot(71);identity=capture['image_id']
+    if change=='pid': state['window']['pid']=902
+    elif change=='bounds': state['bounds'][0]+=10
+    elif change=='client_size': state['client_size'][0]-=10
+    elif change=='capture_offset': state['capture_offset'][0]+=10
+    elif change=='minimized': state['minimized']=True
+    elif change=='expired': desktop.captures[identity]['time']-=61
+    elif change=='unknown': identity='0'*32
+    elif change=='older': desktop.screenshot(71)
+    else: desktop.captures[identity]['window_id']=72
+    with pytest.raises(ValueError,match='screenshot'): desktop.pointer(71,80,80,image_id=identity,coordinate_space='preview')
+    assert not state['events'] and not state['focuses']
+
+
+@pytest.mark.parametrize('space,x,y',[('preview',1600,0),('preview',0,960),('preview',-1,0),
+    ('image',2000,0),('image',0,1200),('image',True,0),('image',1.5,0),
+    ('window',0,0),('window',2008,0),('unrecognised',0,0)])
+def test_referenced_pointer_rejects_invalid_space_or_outside_captured_client(native,space,x,y):
+    desktop,state,_,_=native
+    state.update(bounds=[100,200,2120,1450],capture_offset=[8,31])
+    capture=desktop.screenshot(71)
+    with pytest.raises(ValueError): desktop.pointer(71,x,y,image_id=capture['image_id'],coordinate_space=space)
+    assert not state['events'] and not state['focuses']
+
+
+@pytest.mark.parametrize('space',['preview','image'])
+def test_scaled_coordinates_require_screenshot_identity(native,space):
+    desktop,state,_,_=native
+    with pytest.raises(ValueError,match='image_id'): desktop.pointer(71,80,80,coordinate_space=space)
+    assert not state['events'] and not state['focuses']
+
+
+@pytest.mark.parametrize('change',['pid','bounds','client_size','capture_offset','focus','overlay','cancel','fail_safe','new_image'])
+def test_pointer_rechecks_snapshot_target_and_cancellation_after_cursor_motion_before_click(native,change):
+    desktop,state,_,fail_safe=native
+    capture=desktop.screenshot(71);cancel=Cancellation()
+    def mutate():
+        if change=='pid': state['window']['pid']=902
+        elif change=='bounds': state['bounds'][0]+=10
+        elif change=='client_size': state['client_size'][0]-=10
+        elif change=='capture_offset': state['capture_offset'][0]+=10
+        elif change=='focus': state['focused']=99
+        elif change=='overlay': state.update(point_root=99,point_owner=99)
+        elif change=='cancel': cancel.stopped=True
+        elif change=='fail_safe': state['fail_safe']=True
+        else: desktop.screenshot(71)
+    state['on_move']=mutate
+    expected=Cancelled if change=='cancel' else fail_safe if change=='fail_safe' else ValueError
+    with pytest.raises(expected): desktop.pointer(71,80,80,cancel,image_id=capture['image_id'],coordinate_space='preview')
+    assert state['events']==[('move',(200,300),{'duration':.12})], 'a changed target must not receive a click'
+
+
+def test_pointer_checks_exact_point_owner_again_after_cursor_motion(native):
+    desktop,state,_,_=native
+    desktop.pointer(71,125,85)
+    assert state['points']==[(225,285),(225,285)]
+
+
+@pytest.mark.parametrize('action',['click','double_click','right_click','move'])
+def test_coordinate_actions_return_fresh_screenshot_even_when_accessibility_is_available(native,monkeypatch,action):
+    desktop,state,_,_=native
+    monkeypatch.setattr(desktop,'inspect',lambda *args:{'window':dict(state['window']),'elements':[{'id':'observed'}]})
+    result=desktop.pointer(71,125,85,action=action)
+    assert result['observation']['elements']==[{'id':'observed'}]
+    assert result['image_id'] and len(state['captures'])==1
+    assert sum(event[0]=='click' for event in state['events'])==(0 if action=='move' else 1)
+    if action=='double_click': assert state['events'][-1][2]['clicks']==2
+
+
+def test_failed_accessibility_inspection_still_returns_fresh_pointer_capture(native,monkeypatch):
+    desktop,state,_,_=native
+    def failed(*args): raise ValueError('Inspection unavailable for this custom UI')
+    monkeypatch.setattr(desktop,'inspect',failed)
+    result=desktop.pointer(71,125,85)
+    assert result['image_id'] and len(state['captures'])==1
+    assert 'Inspection unavailable' in result['observation_error']
+    assert sum(event[0]=='click' for event in state['events'])==1
+
+
+@pytest.mark.parametrize('action,extra',[('press_keys',{'keys':'ctrl+f'}),
+    ('scroll',{'direction':'down','amount':2}),('type_text',{'text':'New page content'})])
+def test_native_input_invalidates_previous_screenshot_even_when_uia_observation_needs_no_capture(native,monkeypatch,action,extra):
+    desktop,state,_,_=native
+    capture=desktop.screenshot(71)
+    monkeypatch.setattr(desktop,'inspect',lambda *args:{'window':dict(state['window']),'elements':[{'id':'fresh-control'}]})
+    args={'action':action,'window_id':71,**extra}
+    result=desktop.act(args,desktop.preflight(args))
+    assert result['performed']==action and 'image_id' not in result
+    assert 71 not in desktop.latest_capture
+    before=state['events'][:]
+    with pytest.raises(ValueError,match='stale'):
+        desktop.pointer(71,80,80,image_id=capture['image_id'],coordinate_space='preview')
+    assert state['events']==before, 'stale pixels must not deliver another input after page mutation'
+
+
+@pytest.mark.parametrize('action',['click','double_click','right_click','set_text','scroll','press_keys','close'])
+def test_structured_input_invalidates_previous_screenshot_without_requiring_a_geometry_change(native,monkeypatch,action):
+    desktop,state,_,_=native
+    capture=desktop.screenshot(71)
+    class NoPatternInterfaceError(Exception): pass
+    monkeypatch.setitem(sys.modules,'pywinauto.uia_defines',types.SimpleNamespace(NoPatternInterfaceError=NoPatternInterfaceError))
+    def event(name,*args,**kwargs): state['events'].append((name,args,kwargs))
+    control=types.SimpleNamespace(invoke=lambda:event('invoke'),click_input=lambda **kwargs:event('click_input',**kwargs),
+        iface_value=types.SimpleNamespace(SetValue=lambda text:event('set_text',text)),
+        iface_scroll=types.SimpleNamespace(Scroll=lambda x,y:event('uia_scroll',x,y)))
+    wrapper=types.SimpleNamespace(close=lambda:event('close'))
+    monkeypatch.setattr(desktop,'preflight',lambda args:{'signature':'same-selected-control'})
+    monkeypatch.setattr(desktop,'target',lambda *args:(dict(state['window']),wrapper,control,{}))
+    monkeypatch.setattr(desktop,'inspect',lambda *args:{'window':dict(state['window']),'elements':[{'id':'fresh-control'}]})
+    args={'action':action,'window_id':71,'element_id':'observed','text':'Updated','keys':'ctrl+f','amount':1}
+    desktop.act(args,desktop.preflight(args))
+    assert state['events'] and 71 not in desktop.latest_capture
+    before=state['events'][:]
+    with pytest.raises(ValueError,match='stale'):
+        desktop.pointer(71,80,80,image_id=capture['image_id'],coordinate_space='preview')
+    assert state['events']==before
+
+
+def test_partial_native_input_failure_invalidates_capture_even_without_post_input_observation(native,monkeypatch):
+    desktop,state,mouse,_=native
+    capture=desktop.screenshot(71)
+    def partial(*keys):
+        state['events'].append(('partial_hotkey',keys,{}))
+        raise OSError('Input interrupted after a key was sent')
+    monkeypatch.setattr(mouse,'hotkey',partial)
+    args={'action':'press_keys','window_id':71,'keys':'ctrl+f'}
+    with pytest.raises(OSError,match='interrupted'): desktop.act(args,desktop.preflight(args))
+    assert 71 not in desktop.latest_capture
+    with pytest.raises(ValueError,match='stale'):
+        desktop.pointer(71,80,80,image_id=capture['image_id'],coordinate_space='preview')
+    assert len(state['events'])==1
+
+
+@pytest.mark.parametrize('action',['click','move'])
+def test_failed_post_pointer_capture_keeps_old_image_invalid_and_never_replays_input(native,monkeypatch,action):
+    desktop,state,_,_=native
+    capture=desktop.screenshot(71)
+    def blocked(**kwargs): raise OSError('Capture blocked after delivered input')
+    monkeypatch.setattr('PIL.ImageGrab.grab',blocked)
+    result=desktop.pointer(71,80,80,action=action,image_id=capture['image_id'],coordinate_space='preview')
+    assert result['performed']==action and result['verified'] is False
+    assert 'Capture blocked' in result['observation_error'] and 'image_id' not in result
+    assert 71 not in desktop.latest_capture
+    before=state['events'][:]
+    with pytest.raises(ValueError,match='stale'):
+        desktop.pointer(71,80,80,image_id=capture['image_id'],coordinate_space='preview')
+    assert state['events']==before
+    assert sum(event[0]=='move' for event in state['events'])==1
+    assert sum(event[0]=='click' for event in state['events'])==(1 if action=='click' else 0)
+
+
+def test_read_only_inspect_preflight_and_focus_preserve_current_screenshot(native,monkeypatch):
+    desktop,state,_,_=native
+    capture=desktop.screenshot(71)
+    monkeypatch.setattr(desktop,'inspect',lambda *args:{'window':dict(state['window']),'elements':[]})
+    desktop.inspect(71);desktop.list_windows()
+    desktop.preflight({'action':'press_keys','window_id':71})
+    args={'action':'focus','window_id':71}
+    desktop.act(args,desktop.preflight(args))
+    assert desktop.latest_capture[71]==capture['image_id'] and not state['events']
+
+
+def test_screenshot_registry_retains_only_eighty_recent_usable_images(native,monkeypatch):
+    desktop,state,_,_=native
+    state['client_size']=[100,80]
+    monkeypatch.setattr('PIL.ImageGrab.grab',lambda **kwargs:Image.new('RGB',(100,80),'navy'))
+    identities=[desktop.screenshot(71)['image_id'] for _ in range(81)]
+    assert len(desktop.captures)==80 and identities[0] not in desktop.captures
+    assert desktop.latest_capture[71]==identities[-1]
+    assert len(list(desktop.images.folder.glob('*.jpg')))==80
 
 
 def black_window_capture(monkeypatch,state,on_screen=None,window_error=None,toolbar_height=3):
@@ -215,6 +416,7 @@ def test_still_black_visible_capture_retries_once_then_publishes_no_image(native
     with pytest.raises(ValueError,match='black'): desktop.screenshot(71)
     assert sum('bbox' in capture for capture in state['captures'])==2
     assert not list(desktop.images.folder.glob('*.jpg'))
+    assert desktop.captures=={} and desktop.latest_capture=={}
     assert not state['events'] and state['uia_calls']==0
 
 
@@ -407,7 +609,8 @@ def test_accessibility_enumeration_does_not_swallow_cancellation(native,monkeypa
 def test_window_relative_pointer_delivers_input_and_returns_visual_observation_without_uia(native):
     desktop,state,mouse,_=native
     result=desktop.pointer(71,125,85,action='right_click')
-    assert state['events']==[('click',(225,285),{'button':'right','clicks':1,'interval':0})]
+    assert state['events']==[('move',(225,285),{'duration':.12}),
+                             ('click',(225,285),{'button':'right','clicks':1,'interval':0})]
     assert mouse.FAILSAFE is True
     assert result['performed']=='right_click'
     assert result['verified'] is False,'delivered input is not proof that its requested outcome happened'
@@ -446,6 +649,20 @@ def test_pointer_revalidates_window_identity_and_bounds_after_focusing(native,ch
     state['on_focus']=mutate
     with pytest.raises(ValueError): desktop.pointer(71,125,85)
     assert not state['events'],'a stale or different window must not receive the click'
+
+
+@pytest.mark.parametrize('change',['client_size','capture_offset','new_image'])
+def test_referenced_pointer_revalidates_client_and_latest_image_after_focus_before_motion(native,change):
+    desktop,state,_,_=native
+    capture=desktop.screenshot(71)
+    def mutate():
+        if change=='client_size': state['client_size'][0]-=10
+        elif change=='capture_offset': state['capture_offset'][0]+=10
+        else: desktop.screenshot(71)
+    state['on_focus']=mutate
+    with pytest.raises(ValueError,match='screenshot'):
+        desktop.pointer(71,80,80,image_id=capture['image_id'],coordinate_space='preview')
+    assert not state['events']
 
 
 def test_window_control_preflight_rejects_reused_hwnd_before_acting(native):
