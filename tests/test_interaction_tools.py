@@ -68,6 +68,8 @@ def desktop(tmp_path, monkeypatch):
     window = {'id':7,'pid':101,'title':'Editor','process':'editor.exe'}
     desktop.target = lambda *args:(window,control,control,{'name':'Document'})
     desktop.window = lambda *args:(window,control)
+    desktop.native_window = lambda *args:{**window,'bounds':[100,200,600,600]}
+    desktop.ensure_pointer_target = lambda *args:None
     desktop.preflight = lambda args:{'signature':'observed'}
     desktop.ensure_focus = lambda identity:None
     desktop.inspect = lambda identity,cancel=None:{'window':window,'elements':[]}

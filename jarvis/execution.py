@@ -136,7 +136,9 @@ class PermissionPolicy:
             target = str(metadata.get('target_name', ''))
             if metadata.get('password') or metadata.get('interpreter'):
                 return Decision(True, 'This interacts with a password field, terminal, or command interpreter', 'credentials' if metadata.get('password') else 'command')
-            if action in {'click','double_click','right_click','press_keys','fill','set_text'} and CONSEQUENCE.search(target):
+            if action == 'type_text' and metadata.get('unknown_target'):
+                return Decision(True, 'Native text entry targets the focused field using a screenshot rather than an accessible control.', 'unstructured_ui')
+            if action in {'click','double_click','right_click','press_keys','fill','set_text','type_text'} and CONSEQUENCE.search(target):
                 return Decision(True, 'This control may send information, make a purchase, delete data, or change security settings', 'consequential_ui')
             if re.match(r'\s*(?:javascript|data|file):', args.get('text',''), re.I):
                 return Decision(True, 'This text can activate local content or executable browser code', 'execution')

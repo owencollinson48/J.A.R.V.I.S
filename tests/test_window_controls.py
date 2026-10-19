@@ -64,20 +64,21 @@ def test_browser_fullscreen_is_idempotent_and_restore_exits_with_normal_shortcut
     monkeypatch.setitem(sys.modules,'pywinauto.uia_defines',uia)
     state={'fullscreen':False,'focused':True,'minimized':False,'maximized':False,'window_id':8};pressed=[];sizes=[]
     def press(key): pressed.append(key);state['fullscreen']=not state['fullscreen']
-    monkeypatch.setitem(sys.modules,'pyautogui',types.SimpleNamespace(press=press,FAILSAFE=True))
+    monkeypatch.setitem(sys.modules,'pyautogui',types.SimpleNamespace(press=press,FAILSAFE=True,failSafeCheck=lambda:None))
     monkeypatch.setattr(WindowsApplications,'window_state',lambda identity:dict(state))
     def size(identity,action):sizes.append(action);return {'performed':action,'verified':True,**state}
     monkeypatch.setattr(WindowsApplications,'size_window',size)
-    desktop=DesktopControl(Images(tmp_path));desktop.preflight=lambda args:{'signature':'fixture'}
-    desktop.target=lambda *args:({'id':8,'pid':80,'process':'chrome.exe'},None,None,{})
+    desktop=DesktopControl(Images(tmp_path))
+    item={'id':8,'pid':80,'title':'Browser','process':'chrome.exe'}
+    desktop.native_window=lambda identity:{**item,**state}
     desktop.ensure_focus=lambda identity:None
     for _ in range(2):
-        result=desktop.act({'action':'fullscreen','window_id':8},{'signature':'fixture'})
+        result=desktop.act({'action':'fullscreen','window_id':8},desktop.preflight({'action':'fullscreen','window_id':8}))
         assert result['verified'] and result['fullscreen']
     assert pressed==['f11']
-    restored=desktop.act({'action':'restore','window_id':8},{'signature':'fixture'})
+    restored=desktop.act({'action':'restore','window_id':8},desktop.preflight({'action':'restore','window_id':8}))
     assert pressed==['f11','f11'] and sizes==['restore'] and not restored['fullscreen']
-    desktop.target=lambda *args:({'id':8,'pid':80,'process':'other-app.exe'},None,None,{})
+    item['process']='other-app.exe'
     with pytest.raises(ValueError,match='application-specific'):
-        desktop.act({'action':'fullscreen','window_id':8},{'signature':'fixture'})
+        desktop.act({'action':'fullscreen','window_id':8},desktop.preflight({'action':'fullscreen','window_id':8}))
     assert pressed==['f11','f11']

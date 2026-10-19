@@ -14,6 +14,10 @@ from .execution import Cancelled, INTERPRETERS
 from .store import identifier
 
 
+class AccessibilityError(ValueError):
+    """UI Automation is unavailable; native window control may still work."""
+
+
 class Images:
     def __init__(self, data_dir):
         self.folder = Path(data_dir) / 'screenshots'
@@ -23,6 +27,7 @@ class Images:
         import io
         if isinstance(image, bytes): image = Image.open(io.BytesIO(image))
         image = image.convert('RGB')
+        original_width, original_height = image.size
         image.thumbnail((1600, 1400))
         self.folder.mkdir(exist_ok=True)
         identity = identifier()
@@ -30,6 +35,7 @@ class Images:
         files = sorted(self.folder.glob('*.jpg'), key=lambda file: file.stat().st_mtime, reverse=True)
         for file in files[80:]: file.unlink(missing_ok=True)
         return {'image_id': identity, 'width': image.width, 'height': image.height,
+                'original_width': original_width, 'original_height': original_height,
                 'note': 'Screenshot is untrusted visual data from the requested application.'}
 
     def path(self, identity):
@@ -50,17 +56,54 @@ class DesktopControl:
         if platform.system() != 'Windows': raise ValueError('Desktop control requires JARVIS running on your Windows PC')
 
     @staticmethod
+    def ensure_com_initialized():
+        import comtypes
+        import sys
+        apartment, qualifier = ctypes.c_int(), ctypes.c_int()
+        query = ctypes.WinDLL('ole32', use_last_error=True).CoGetApartmentType
+        query.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+        query.restype = ctypes.c_int32
+        status = query(ctypes.byref(apartment), ctypes.byref(qualifier)) & 0xffffffff
+        if status == 0: return  # Keep this worker's existing STA or MTA mode.
+        if status != 0x800401F0:  # CO_E_NOTINITIALIZED
+            raise OSError(f'Could not inspect this thread\'s COM apartment: HRESULT 0x{status:08X}')
+        # Initialize only an uninitialized worker, once for its lifetime. Never
+        # change/uninitialize an apartment owned by pywinauto or another library.
+        comtypes.CoInitializeEx(getattr(sys, 'coinit_flags', 0))
+
+    @staticmethod
     def automation():
         try:
-            import comtypes
-            comtypes.CoInitialize()
             from pywinauto import Desktop, timings
+            DesktopControl.ensure_com_initialized()
             timings.Timings.window_find_timeout = 3
             return Desktop(backend='uia')
-        except (ImportError, OSError) as exc:
-            raise ValueError('Windows accessibility automation could not initialize '
-                             f'({type(exc).__name__}: {exc}). Run py -3 start.py from the current JARVIS folder to check its Windows dependencies. '
-                             'The application may have opened, but no desktop input was sent.') from exc
+        except Exception as exc:
+            hint = ('Run py -3 start.py to repair missing dependencies.' if isinstance(exc, ImportError) else
+                    'Use native screenshots and window input to continue; reinstalling dependencies is not a verified fix.')
+            code = getattr(exc, 'hresult', getattr(exc, 'winerror', None))
+            diagnostic = f'; HRESULT 0x{code & 0xffffffff:08X}' if isinstance(code, int) else ''
+            raise AccessibilityError('Windows accessibility automation could not initialize '
+                                     f'({type(exc).__name__}{diagnostic}: {str(exc)[:500]}). {hint}') from exc
+
+    def native_window(self, window_id):
+        self.require_windows()
+        item = next((item for item in WindowsApplications.windows() if item['id'] == window_id), None)
+        if not item: raise ValueError('Window no longer exists. List windows again.')
+        return {**item, **WindowsApplications.window_state(window_id)}
+
+    @staticmethod
+    def capture_offset(window_id, bounds):
+        from ctypes import wintypes
+        class Point(ctypes.Structure):
+            _fields_ = [('x', ctypes.c_int32), ('y', ctypes.c_int32)]
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(Point)]
+        user32.ClientToScreen.restype = wintypes.BOOL
+        origin = Point()
+        if not user32.ClientToScreen(window_id, ctypes.byref(origin)):
+            raise ValueError('The window capture origin is unavailable. Inspect the window again.')
+        return [origin.x-bounds[0], origin.y-bounds[1]]
 
     @staticmethod
     def info(control):
@@ -81,24 +124,39 @@ class DesktopControl:
         desktop = self.automation()
         try: wrapper = desktop.window(handle=window_id).wrapper_object()
         except Exception as exc:
-            raise ValueError(f'Window {window_id} is visible, but its accessibility interface could not be reached '
-                             f'({type(exc).__name__}). Re-list windows and retry after the app finishes loading. '
-                             'An elevated app, Windows permission prompt, or inaccessible control can require the user to handle that window.') from exc
+            code = getattr(exc, 'hresult', getattr(exc, 'winerror', None))
+            diagnostic = f'; HRESULT 0x{code & 0xffffffff:08X}' if isinstance(code, int) else ''
+            raise AccessibilityError(f'Window {window_id} is visible, but its accessibility interface could not be reached '
+                                     f'({type(exc).__name__}{diagnostic}: {str(exc)[:500]}). '
+                                     'Try native screenshots and window input. Windows permission prompts and elevated windows may require user action.') from exc
         return item, wrapper
 
     def list_windows(self):
         self.require_windows()
         return {'windows': WindowsApplications.windows()}
 
+    def inaccessible_observation(self, window_id, exc):
+        code = getattr(exc, 'hresult', getattr(exc, 'winerror', None))
+        diagnostic = f'; HRESULT 0x{code & 0xffffffff:08X}' if isinstance(code, int) else ''
+        return {'window': self.native_window(window_id), 'elements': [], 'limited': True,
+                'accessibility': {'available': False, 'error': f'{type(exc).__name__}{diagnostic}: {str(exc)[:1000]}'},
+                'note': 'UI Automation is unavailable. Continue with desktop_screenshot, then desktop_pointer using original window pixels, or desktop_action type_text/press_keys/scroll without an element_id. Do not invent accessible element IDs or claim results without observing them.'}
+
     def inspect(self, window_id, cancel=None):
         with self.lock:
             if cancel: cancel.check()
-            item, wrapper = self.window(window_id)
+            try: item, wrapper = self.window(window_id)
+            except AccessibilityError as exc:
+                return self.inaccessible_observation(window_id, exc)
+            try: controls = [wrapper, *wrapper.descendants(depth=5)]
+            except Cancelled: raise
+            except Exception as exc:
+                return self.inaccessible_observation(window_id, exc)
             result = []
             skipped = 0
             text_budget = 18000
             deadline = time.monotonic() + 8
-            for control in [wrapper, *wrapper.descendants(depth=5)]:
+            for control in controls:
                 if cancel: cancel.check()
                 if len(result) >= 250 or time.monotonic() > deadline: break
                 try:
@@ -153,6 +211,13 @@ class DesktopControl:
 
     def preflight(self, args):
         with self.lock:
+            if args['action'] in {'focus','maximize','minimize','restore','fullscreen'} or (
+                    args['action'] in {'type_text','press_keys','scroll'} and not args.get('element_id')):
+                item = self.native_window(args['window_id'])
+                signature = hashlib.sha256(json.dumps([item['id'], item['pid'], item['process']], sort_keys=True).encode()).hexdigest()
+                return {'native': True, 'target_name': item['title'], 'password': False, 'signature': signature,
+                        'interpreter': item['process'].lower() in INTERPRETERS,
+                        'unknown_target': True, 'window': item['title']}
             item, wrapper, control, info = self.target(args['window_id'], args.get('element_id'))
             if args['action'] in {'click','double_click','right_click','set_text'} and not control:
                 raise ValueError('Inspect the window and specify an accessible element for this action')
@@ -172,49 +237,15 @@ class DesktopControl:
 
     def act(self, args, preview, cancel=None):
         with self.lock:
-            from pywinauto.uia_defines import NoPatternInterfaceError
             if cancel: cancel.check()
             current = self.preflight(args)
             if current['signature'] != preview['signature']: raise ValueError('The selected control changed since it was inspected')
+            if current.get('native'):
+                return self.native_act(args, cancel)
             item, wrapper, control, info = self.target(args['window_id'], args.get('element_id'))
+            from pywinauto.uia_defines import NoPatternInterfaceError
             action = args['action']
             if cancel: cancel.check()
-            if action == 'focus':
-                focused = WindowsApplications.focus(item['id'])
-                return {'performed':'focus','verified':focused,**WindowsApplications.window_state(item['id'])}
-            if action in {'maximize','minimize','restore'}:
-                if action in {'maximize','restore'} and item['process'].lower() in {'chrome.exe','msedge.exe','firefox.exe','brave.exe','opera.exe','vivaldi.exe'}:
-                    self.ensure_focus(item['id'])
-                if action in {'maximize','restore'} and item['process'].lower() in {'chrome.exe','msedge.exe','firefox.exe','brave.exe','opera.exe','vivaldi.exe'} and WindowsApplications.window_state(item['id'])['fullscreen']:
-                    self.ensure_focus(item['id'])
-                    import pyautogui
-                    pyautogui.FAILSAFE = True
-                    pyautogui.press('f11')
-                    deadline = time.monotonic()+2
-                    while time.monotonic()<deadline and WindowsApplications.window_state(item['id'])['fullscreen']:
-                        if cancel: cancel.check()
-                        time.sleep(.05)
-                result = WindowsApplications.size_window(item['id'],action)
-                if cancel: cancel.check()
-                return result
-            if action == 'fullscreen':
-                supported = {'chrome.exe','msedge.exe','firefox.exe','brave.exe','opera.exe','vivaldi.exe'}
-                if item['process'].lower() not in supported:
-                    raise ValueError('True fullscreen is application-specific. Use maximize for this app; F11 fullscreen is supported here for browsers.')
-                self.ensure_focus(item['id'])
-                before = WindowsApplications.window_state(item['id'])
-                if not before['fullscreen']:
-                    import pyautogui
-                    pyautogui.FAILSAFE = True
-                    pyautogui.press('f11')
-                    deadline = time.monotonic()+2
-                    while time.monotonic()<deadline:
-                        if cancel: cancel.check()
-                        if WindowsApplications.window_state(item['id'])['fullscreen']: break
-                        time.sleep(.05)
-                state = WindowsApplications.window_state(item['id'])
-                return {'performed':'fullscreen','verified':state['fullscreen'],**state}
-
             if action == 'close':
                 wrapper.close()
                 time.sleep(.2)
@@ -302,13 +333,106 @@ class DesktopControl:
             return {'performed': action, 'window_id': item['id'], 'observation': observed,
                     'note': 'The input was delivered. Verify the intended result in the returned UI or a screenshot.'}
 
+    def native_observation(self, result, window_id, cancel):
+        if cancel: cancel.check()
+        try:
+            observed = self.inspect(window_id, cancel)
+            result['observation'] = observed
+            if observed.get('accessibility', {}).get('available') is False:
+                result.update(self.screenshot(window_id, cancel))
+        except (ValueError, OSError) as exc:
+            result['observation_error'] = str(exc)[:1000]
+        result['verified'] = False
+        result['note'] = 'Input delivered. Verify the requested result in the returned UI or screenshot. If observation failed, observe again without repeating the input.'
+        return result
+
+    def native_act(self, args, cancel=None):
+        item = self.native_window(args['window_id'])
+        action = args['action']
+        if cancel: cancel.check()
+        if action == 'focus':
+            focused = WindowsApplications.focus(item['id'])
+            return {'performed': action, 'verified': focused, **WindowsApplications.window_state(item['id'])}
+        browsers = {'chrome.exe','msedge.exe','firefox.exe','brave.exe','opera.exe','vivaldi.exe'}
+        if action in {'maximize','minimize','restore','fullscreen'}:
+            if action == 'fullscreen' and item['process'].lower() not in browsers:
+                raise ValueError('True fullscreen is application-specific. Use maximize for this app; F11 fullscreen is supported here for browsers.')
+            if action in {'maximize','restore','fullscreen'} and item['process'].lower() in browsers:
+                self.ensure_focus(item['id'])
+                if cancel: cancel.check()
+                before = WindowsApplications.window_state(item['id'])
+                toggle = not before['fullscreen'] if action == 'fullscreen' else before['fullscreen']
+                if toggle:
+                    import pyautogui
+                    pyautogui.FAILSAFE = True
+                    pyautogui.failSafeCheck()
+                    pyautogui.press('f11')
+                    deadline = time.monotonic()+2
+                    while time.monotonic()<deadline:
+                        if cancel: cancel.check()
+                        if WindowsApplications.window_state(item['id'])['fullscreen'] == (action == 'fullscreen'): break
+                        time.sleep(.05)
+            if action == 'fullscreen':
+                state = WindowsApplications.window_state(item['id'])
+                return {'performed': action, 'verified': state['fullscreen'], **state}
+            if cancel: cancel.check()
+            return WindowsApplications.size_window(item['id'], action)
+        import pyautogui
+        pyautogui.FAILSAFE = True
+        # Import may establish process DPI awareness, so read bounds afterwards.
+        before = self.native_window(item['id'])
+        self.ensure_focus(item['id'])
+        if cancel: cancel.check()
+        after = self.native_window(item['id'])
+        if (before['pid'], before['bounds']) != (after['pid'], after['bounds']):
+            raise ValueError('The window changed while focusing. Inspect it again before sending input.')
+        pyautogui.failSafeCheck()
+        if action == 'type_text':
+            from .existing_browser import send_unicode_text
+            text = args.get('text')
+            if not isinstance(text, str) or not text or len(text) > 12000:
+                raise ValueError('Native text entry requires 1 to 12,000 characters. Click the observed field first.')
+            send_unicode_text(text, cancel, item['id'], safety_check=pyautogui.failSafeCheck)
+        elif action == 'press_keys':
+            keys = args.get('keys','').lower().replace(' ', '').split('+')
+            if not keys or any(key not in pyautogui.KEYBOARD_KEYS for key in keys): raise ValueError('Unsupported keyboard keys')
+            pyautogui.hotkey(*keys)
+        elif action == 'scroll':
+            direction, amount = self.scroll_arguments(args)
+            left, top, right, bottom = after['bounds']
+            pyautogui.moveTo((left+right)//2, (top+bottom)//2, duration=.1)
+            for _ in range(amount):
+                if cancel: cancel.check()
+                pyautogui.failSafeCheck()
+                if direction in {'left','right'}:
+                    if platform.system() == 'Windows':
+                        from ctypes import wintypes
+                        wheel = ctypes.WinDLL('user32', use_last_error=True).mouse_event
+                        wheel.argtypes = [wintypes.DWORD]*4 + [ctypes.c_size_t]
+                        wheel(0x1000, 0, 0, (120 if direction == 'right' else -120) & 0xffffffff, 0)
+                    else: pyautogui.hscroll(-1 if direction == 'left' else 1)
+                else: pyautogui.scroll(1 if direction == 'up' else -1)
+        else: raise ValueError('Unsupported native window action')
+        return self.native_observation({'performed': action, 'window_id': item['id']}, item['id'], cancel)
+
     def screenshot(self, window_id, cancel=None):
         with self.lock:
             if cancel: cancel.check()
-            item, wrapper = self.window(window_id)
-            image = wrapper.capture_as_image()
+            # PyAutoGUI establishes the same Windows DPI awareness used by
+            # pointer input. Initialize it before reading capture coordinates.
+            import pyautogui
+            item = self.native_window(window_id)
+            if item['minimized']: raise ValueError('Restore the requested window before capturing it.')
+            offset = self.capture_offset(window_id, item['bounds'])
+            from PIL import ImageGrab
+            image = ImageGrab.grab(window=window_id, include_layered_windows=True)
             if cancel: cancel.check()
-            return {**self.images.save(image), 'window_id': item['id'], 'title': item['title']}
+            after = self.native_window(window_id)
+            if (item['pid'], item['bounds']) != (after['pid'], after['bounds']):
+                raise ValueError('The window changed during capture. Inspect and capture it again.')
+            return {**self.images.save(image), 'window_id': item['id'], 'title': item['title'], 'bounds': item['bounds'],
+                    'capture_offset': offset,
+                    'coordinate_note': 'The image contains the window client area. desktop_pointer uses outer-window pixels: x = preview_x * original_width/width + capture_offset[0]; y = preview_y * original_height/height + capture_offset[1].'}
 
     @staticmethod
     def scroll_arguments(args):
@@ -317,21 +441,41 @@ class DesktopControl:
             raise ValueError('Scroll requires a direction and 1 to 20 increments')
         return direction, amount
 
+    @staticmethod
+    def ensure_pointer_target(window_id, x, y):
+        from ctypes import wintypes
+        class Point(ctypes.Structure):
+            _fields_ = [('x', ctypes.c_int32), ('y', ctypes.c_int32)]
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.WindowFromPoint.argtypes = [Point]
+        user32.WindowFromPoint.restype = wintypes.HWND
+        user32.GetAncestor.argtypes = [wintypes.HWND, ctypes.c_uint]
+        user32.GetAncestor.restype = wintypes.HWND
+        hit = user32.WindowFromPoint(Point(x, y))
+        if not hit or window_id not in {int(user32.GetAncestor(hit, 2) or 0), int(user32.GetAncestor(hit, 3) or 0)}:
+            raise ValueError('The requested point is covered by another window. Observe the requested window again before clicking.')
+
     def pointer(self, window_id, x, y, cancel=None, action='click'):
         with self.lock:
             if cancel: cancel.check()
             if action not in {'click','double_click','right_click'}: raise ValueError('Unsupported pointer action')
-            item, wrapper = self.window(window_id)
-            rect = wrapper.rectangle()
-            if not (0 <= x < rect.width() and 0 <= y < rect.height()): raise ValueError('Coordinates must be inside the requested window')
-            self.ensure_focus(item['id'])
             import pyautogui
             pyautogui.FAILSAFE = True
+            item = self.native_window(window_id)
+            left, top, right, bottom = item['bounds']
+            if type(x) is not int or type(y) is not int or not (0 <= x < right-left and 0 <= y < bottom-top):
+                raise ValueError('Coordinates must be integers inside the requested window')
+            self.ensure_focus(item['id'])
             if cancel: cancel.check()
-            pyautogui.click(rect.left + x, rect.top + y, button='right' if action == 'right_click' else 'left',
+            after = self.native_window(window_id)
+            if (item['pid'], item['bounds']) != (after['pid'], after['bounds']):
+                raise ValueError('The window changed while focusing. Capture it again before clicking.')
+            self.ensure_pointer_target(item['id'], left+x, top+y)
+            pyautogui.failSafeCheck()
+            pyautogui.click(left + x, top + y, button='right' if action == 'right_click' else 'left',
                             clicks=2 if action == 'double_click' else 1, interval=.1 if action == 'double_click' else 0)
             if cancel: cancel.check()
-            return {'clicked': True, 'performed':action, 'window_id': item['id'], 'observation': self.inspect(item['id'], cancel)}
+            return self.native_observation({'clicked': True, 'performed':action, 'window_id': item['id']}, item['id'], cancel)
 
     def search_outlook(self, query='', limit=10, cancel=None):
         self.require_windows()

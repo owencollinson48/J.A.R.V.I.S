@@ -180,12 +180,9 @@ def test_inaccessible_sibling_does_not_block_an_observed_control(controls):
     assert state['text']=='Still editable'
 
 
-def test_accessibility_import_failure_explains_why_open_app_received_no_input(monkeypatch):
-    broken = types.ModuleType('comtypes')
-    def initialize(): raise OSError('Windows automation runtime unavailable')
-    broken.CoInitialize = initialize
-    monkeypatch.setitem(sys.modules,'comtypes',broken)
-    with pytest.raises(ValueError, match='no desktop input was sent') as error:
+def test_accessibility_import_failure_explains_missing_dependency(monkeypatch):
+    monkeypatch.setitem(sys.modules,'pywinauto',None)
+    with pytest.raises(ValueError, match='ModuleNotFoundError') as error:
         DesktopControl.automation()
     assert 'py -3 start.py' in str(error.value)
 
