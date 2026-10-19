@@ -8,7 +8,10 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/voice.css">
+  <link rel="stylesheet" href="/static/automation.css">
+  <link rel="stylesheet" href="/static/hud.css">
   <script src="/static/voice.js" defer></script>
+  <script src="/static/hud.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -21,7 +24,9 @@
         <button class="nav-item active" data-view="chat"><span data-icon="chat"></span>Assistant<span class="nav-dot"></span></button>
         <button class="nav-item" data-view="planner"><span data-icon="check"></span>My planner<span id="task-count" class="nav-count">0</span></button>
         <button class="nav-item" data-view="files"><span data-icon="folder"></span>Computer</button>
+        <button class="nav-item" data-view="applications"><span data-icon="grid"></span>Applications</button>
         <button class="nav-item" data-view="memory"><span data-icon="memory"></span>Memory</button>
+        <button class="nav-item" data-view="activity"><span data-icon="clock"></span>Activity</button>
       </nav>
       <div class="recent-heading"><p class="nav-label">RECENT CONVERSATIONS</p><span data-icon="clock"></span></div>
       <div id="conversation-list" class="conversation-list"><p class="sidebar-empty">A fresh start. What’s on your mind?</p></div>
@@ -35,22 +40,25 @@
     <div class="main-column">
       <header class="topbar">
         <div class="breadcrumbs"><button class="icon-button mobile-menu" id="menu-button" aria-label="Toggle navigation"><span data-icon="menu"></span></button><span class="crumb-icon" data-icon="grid"></span><span>Workspace</span><span class="slash">/</span><strong id="view-title">Assistant</strong></div>
-        <div class="topbar-right"><span class="local-badge"><span class="status-light"></span>LOCAL</span><span class="topbar-date" id="today-date"></span><button class="icon-button" id="notifications-button" aria-label="Show reminders"><span data-icon="bell"></span><i id="notification-dot" hidden></i></button></div>
+        <div class="topbar-right"><button type="button" class="emergency-stop" id="emergency-stop" title="Stop all work · Escape · Ctrl+Alt+F8 on Windows" hidden>■ Stop task</button><span class="local-badge"><span class="status-light"></span>LOCAL</span><span class="topbar-date" id="today-date"></span><button class="icon-button" id="notifications-button" aria-label="Show reminders"><span data-icon="bell"></span><i id="notification-dot" hidden></i></button></div>
       </header>
 
       <main id="chat-view" class="view chat-view">
+        <section class="jarvis-stage" aria-label="JARVIS voice interface">
+          <div class="stage-heading"><h1>J.A.R.V.I.S.</h1><p>PERSONAL INTELLIGENCE SYSTEM</p></div>
+          <span class="stage-coordinate left" aria-hidden="true">VOICE INTERFACE<b>NEURAL CORE / 01</b></span>
+          <button type="button" id="jarvis-hud" class="hud-button" data-voice-toggle aria-label="Start hands-free conversation" aria-pressed="false"></button>
+          <span class="stage-coordinate right" aria-hidden="true">LOCAL WORKSPACE<b>AWAITING YOUR VOICE</b></span>
+          <div class="hud-readout"><strong id="hud-status" role="status">STANDING BY</strong><p id="hud-hint">Click the circle once to start talking</p></div>
+        </section>
         <section id="voice-session" class="voice-session" aria-label="Hands-free conversation" hidden>
           <div class="session-orbit"><button type="button" class="core-center voice-orb" data-voice-toggle aria-label="End hands-free conversation" aria-pressed="false"><span>J</span></button></div>
           <div class="voice-session-copy"><strong id="voice-session-status" role="status">Ready to listen</strong><p id="voice-transcript">Speak naturally. I’ll reply, then listen again.</p><small>Say “stop listening” to end the session.</small></div>
           <div class="voice-session-tools"><button type="button" class="secondary-button" id="voice-skip" hidden>Skip spoken reply</button><button type="button" class="text-button" id="voice-stop">End conversation</button></div>
         </section>
         <div class="chat-scroll" id="chat-scroll">
+          <details id="workflow-card" class="workflow-card" hidden><summary><span id="workflow-title">Your task</span><span id="workflow-status" class="pill"></span></summary><p id="workflow-outcome"></p><ol id="workflow-steps"></ol><button type="button" class="text-button" data-open-view="activity">View action log ↗</button></details>
           <div class="welcome" id="welcome">
-            <div class="eyebrow"><span class="short-line"></span> YOUR PERSONAL COMMAND CENTER</div>
-            <h1>A little more clarity.<br>A lot more <span>possibility.</span></h1>
-            <p class="welcome-description">Think out loud. Make a plan. Get things done.<br>I’m JARVIS, and I’m here to help you move forward.</p>
-            <div class="core-scene"><div class="orbit orbit-outer" aria-hidden="true"></div><div class="orbit orbit-middle" aria-hidden="true"></div><div class="orbit orbit-inner" aria-hidden="true"></div><div class="core-glow" aria-hidden="true"></div><button type="button" class="core-center voice-orb" data-voice-toggle aria-label="Start hands-free conversation" aria-pressed="false"><span>J</span></button><span class="orbit-marker marker-one" aria-hidden="true"></span><span class="orbit-marker marker-two" aria-hidden="true"></span><span class="core-coordinate coordinate-left">INTELLIGENCE<br>WITH INTENTION</span><span class="core-coordinate coordinate-right">CLICK ONCE<br>THEN JUST TALK</span></div>
-            <p class="voice-orb-hint">Click the circle once. Then just talk.</p>
             <div class="welcome-status"><span class="status-light" id="model-light"></span><span id="model-status">Checking your workspace</span></div>
             <div class="suggestion-grid">
               <button class="suggestion" data-prompt="Help me plan my day. Start by looking at my tasks and goals."><span class="suggestion-icon amber" data-icon="sun"></span><strong>Make room for what matters</strong><span>Let’s plan your day<span>↗</span></span></button>
@@ -65,7 +73,7 @@
         <div class="composer-area">
           <div id="chat-error" class="inline-error" role="alert" hidden></div>
           <div class="composer"><textarea id="chat-input" rows="1" placeholder="Ask anything. Let’s make it happen." aria-label="Message JARVIS"></textarea><div class="composer-bottom"><div class="composer-tools"><button class="icon-button" id="attach-button" title="Browse computer files" aria-label="Browse computer files"><span data-icon="plus"></span></button><span class="composer-divider"></span><button class="voice-mode" id="speak-toggle" aria-pressed="false"><span data-icon="volume"></span><span>Voice off</span></button></div><div class="composer-actions"><button class="icon-button" id="mic-button" aria-label="Dictate a message" title="Dictate a message"><span data-icon="mic"></span></button><button id="send-button" class="send-button" aria-label="Send message"><span data-icon="arrow"></span></button></div></div></div>
-          <p class="composer-note"><span data-icon="shield"></span> You’re in control. Computer changes always ask for your approval.<span class="enter-hint">Enter to send · Shift + Enter for a new line</span></p>
+          <p class="composer-note"><span data-icon="shield"></span><span id="permission-note">Requested routine actions run automatically. Significant consequences ask first.</span><span class="enter-hint">Enter to send · Shift + Enter for a new line</span></p>
         </div>
       </main>
 
@@ -90,14 +98,27 @@
         <div class="section-heading"><h3>Saved memories</h3><span id="memory-count" class="muted"></span></div><div id="memory-list" class="memory-grid"></div><div id="memory-results"></div>
       </main>
 
+      <main id="applications-view" class="view page-view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">THE RIGHT APP. WITHOUT THE PATH.</div><h1>Your applications</h1><p>Installed apps, Store apps, shortcuts, protocols, and remembered preferences.</p></div><button type="button" class="primary-button" id="refresh-applications">Refresh index ↻</button></div>
+        <div class="file-search"><span data-icon="search"></span><input id="application-query" placeholder="Outlook, MATLAB, Spotify…" aria-label="Search applications"><button class="text-button" id="search-applications">Search</button></div>
+        <p id="application-report" class="field-note" role="status"></p><div id="application-list"></div>
+        <section class="settings-section"><h2>Remember an application preference</h2><p>For example, map “emails” to the Outlook version you use.</p><div class="form-grid"><label>Alias<input id="application-alias" placeholder="emails" maxlength="120"></label><label>Application<select id="alias-application"></select></label></div><button type="button" class="secondary-button" id="save-application-alias">Remember preference</button><p id="application-aliases" class="field-note"></p></section>
+      </main>
+
+      <main id="activity-view" class="view page-view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">EVERY STEP, IN VIEW</div><h1>Activity</h1><p>Task plans, actions, verification results, and recoverable file changes.</p></div><button type="button" class="secondary-button" id="refresh-activity">Refresh ↻</button></div>
+        <div id="activity-flow" class="flow-canvas" data-flow-graph aria-label="Live task flow"></div><p id="emergency-status" class="field-note"></p><div id="workflow-list"></div><div class="section-heading"><h3>Recent actions</h3></div><div id="action-list"></div>
+      </main>
+
       <main id="settings-view" class="view page-view" hidden>
         <div class="page-heading"><div><div class="eyebrow">MAKE YOURSELF AT HOME</div><h1>Your JARVIS, your way</h1><p>Connect your intelligence. Choose what’s within reach.</p></div></div>
         <form id="settings-form">
           <section class="settings-section"><div class="section-heading"><h2><span data-icon="sparkles"></span> Intelligence</h2><span class="pill" id="provider-pill">Not connected</span></div><p>Use an OpenAI-compatible provider, or keep inference on your computer with Ollama. Selected conversation context and tool results are sent to this provider.</p>
           <div class="provider-presets"><button type="button" class="secondary-button" id="preset-openai">OpenAI</button><button type="button" class="secondary-button" id="preset-ollama">Ollama · local</button><button type="button" class="text-button" id="clear-api-key">Remove saved key</button></div>
           <label>Provider base URL<input name="provider_url" id="provider-url" type="url" required placeholder="https://api.openai.com/v1"></label><div class="form-grid"><label>Model<input name="model" id="provider-model" required placeholder="gpt-4.1-mini"></label><label>API key<input name="api_key" id="provider-key" type="password" autocomplete="off" placeholder="Enter a key to connect"></label></div><p class="field-note">Keys stay in your local settings file, accessible to your Windows account. Leave blank to keep your saved key. Ollama needs no key.</p><button type="button" id="check-provider" class="secondary-button">Test connection <span>↗</span></button><span id="provider-result" role="status"></span></section>
-          <section class="settings-section"><h2><span data-icon="folder"></span> Computer access</h2><p>JARVIS can read within these folders. Add a drive such as C:\ to give it access across that drive. File edits, app launches, and commands ask for approval.</p><label>Allowed folders · one per line<textarea id="access-roots" rows="3" required spellcheck="false"></textarea></label><div id="drive-buttons" class="drive-buttons"></div><p class="field-note">Commands you approve run with your Windows account’s permissions. Folder limits apply to file tools, not programs you launch.</p></section>
-          <section class="settings-section"><h2><span data-icon="volume"></span> Voice & conversation</h2><p>Click the JARVIS circle once to enable hands-free conversation. It sends your words after a pause, speaks its reply, then listens again. Use Chrome or Edge and keep this tab open.</p><label>Reply voice<select id="voice-select" aria-describedby="voice-hint"><option value="">Automatic · British English</option></select></label><p id="voice-hint" class="field-note" role="status">Loading available voices…</p><label>Speaking speed <span id="voice-rate-label">1.0×</span><input id="voice-rate" type="range" min="0.75" max="1.25" step="0.05" value="1"></label><button type="button" class="secondary-button" id="voice-preview">Hear a sample</button><p class="field-note">Voice choices are saved automatically in this browser. No audio upload is needed. Browser speech services may process your microphone audio online. Computer actions still wait for on-screen approval.</p></section>
+          <section class="settings-section"><h2><span data-icon="folder"></span> Computer access</h2><p>Choose the folders JARVIS can work in. Add a drive such as C:\ for access across that drive. Requested routine edits and saves use automatic backups.</p><label>Allowed folders · one per line<textarea id="access-roots" rows="3" required spellcheck="false"></textarea></label><div id="drive-buttons" class="drive-buttons"></div><p class="field-note">Programs and commands run with your Windows account’s permissions. Folder limits apply to file tools. Unrestricted commands and significant consequences require review.</p></section>
+          <section class="settings-section"><h2><span data-icon="shield"></span> Autonomy & confirmation</h2><p>Your request authorizes its ordinary steps. Significant consequences still require a final review. Windows authentication, UAC, and security controls remain enforced.</p><label>Execution mode<select id="permissions-mode"><option value="routine">Run requested routine actions automatically</option><option value="review">Review every computer action</option></select></label><label>Task time limit · seconds<input id="workflow-timeout" type="number" min="30" max="900" step="1" value="300"></label><label>Additional application folders · one per line<textarea id="application-directories" rows="3" placeholder="D:\Portable Apps"></textarea></label><p class="field-note">The app index also reads Windows registrations, Start Menu entries, packages and PATH. Extra folders are bounded scans, including portable executables. Managed browser sessions use a separate profile; sign in there yourself when needed.</p></section>
+          <section class="settings-section"><h2><span data-icon="volume"></span> Voice & conversation</h2><p>Click the JARVIS circle once to enable hands-free conversation. It sends your words after a pause, speaks its reply, then listens again. Use Chrome or Edge and keep this tab open.</p><label>Reply voice<select id="voice-select" aria-describedby="voice-hint"><option value="">Automatic · British English</option></select></label><p id="voice-hint" class="field-note" role="status">Loading available voices…</p><label>Speaking speed <span id="voice-rate-label">1.0×</span><input id="voice-rate" type="range" min="0.75" max="1.25" step="0.05" value="1"></label><button type="button" class="secondary-button" id="voice-preview">Hear a sample</button><p class="field-note">Voice choices are saved automatically in this browser. No audio upload is needed. Browser speech services may process your microphone audio online. Routine requested work runs automatically; consequential actions require on-screen approval.</p></section>
           <section class="settings-section"><h2><span data-icon="user"></span> Personal touches</h2><label>What should JARVIS call you?<input id="user-name" placeholder="Your name" maxlength="100"></label><label class="checkbox-label"><input type="checkbox" id="native-notifications"> Windows desktop reminders</label><button type="button" class="secondary-button" id="enable-notifications">Enable browser notifications</button><p class="field-note">Keep JARVIS running for reminders. Missed reminders appear the next time it starts.</p><div class="storage-note"><span data-icon="shield"></span><span id="storage-path"></span></div></section>
           <div class="settings-footer"><span id="settings-result" role="status"></span><button type="submit" class="primary-button">Save changes <span>↗</span></button></div>
         </form>

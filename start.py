@@ -31,7 +31,9 @@ def prepare(root):
         raise RuntimeError("The .venv Python cannot run. Rename .venv to .venv-old, then try again.")
     marker = environment / ".jarvis-dependencies.sha256"
     fingerprint = dependency_digest(root)
-    imports = [str(python), "-c", "import fastapi, uvicorn, httpx, docx"]
+    probe = "import fastapi, uvicorn, httpx, docx, psutil, PIL, playwright"
+    if os.name == 'nt': probe += "; import pywinauto, pyautogui, win32com.client"
+    imports = [str(python), "-c", probe]
     if marker.exists() and marker.read_text().strip() == fingerprint:
         if subprocess.run(imports, cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
             print("JARVIS dependencies are already installed.", flush=True)

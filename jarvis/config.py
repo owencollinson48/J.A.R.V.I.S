@@ -20,6 +20,9 @@ class Settings:
             "roots": [str(Path.home())],
             "name": "",
             "native_notifications": True,
+            "permissions_mode": "routine",
+            "application_directories": [],
+            "workflow_timeout": 300,
         }
         if self.path.exists():
             self.values.update(json.loads(self.path.read_text(encoding="utf-8")))
@@ -62,6 +65,18 @@ class Settings:
                     raise ValueError(f"Not a folder: {root}")
                 resolved.append(str(path))
             candidate["roots"] = list(dict.fromkeys(resolved))
+            if candidate['permissions_mode'] not in {'routine', 'review'}:
+                raise ValueError('Choose routine autonomy or review mode')
+            if not isinstance(candidate['workflow_timeout'], int) or not 30 <= candidate['workflow_timeout'] <= 900:
+                raise ValueError('Workflow timeout must be between 30 and 900 seconds')
+            if not isinstance(candidate['application_directories'], list):
+                raise ValueError('Application directories must be a list of folders')
+            folders = []
+            for value in candidate['application_directories']:
+                folder = Path(value).expanduser().resolve(strict=True)
+                if not folder.is_dir(): raise ValueError('Application discovery paths must be folders')
+                folders.append(str(folder))
+            candidate['application_directories'] = list(dict.fromkeys(folders))
             tmp = self.path.with_suffix(".tmp")
             # Credentials are local to this OS account; never returned to the browser.
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

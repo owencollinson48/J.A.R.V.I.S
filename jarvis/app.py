@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import hmac
+import json
 import secrets
 import sqlite3
 from contextlib import asynccontextmanager
@@ -14,6 +16,8 @@ from pydantic import BaseModel, Field
 from .assistant import Assistant
 from .computer import Computer
 from .config import Settings
+from .desktop import EmergencyHotkey
+from .execution import RunContext
 from .provider import Provider, ProviderError
 from .scheduler import Scheduler
 from .store import Store
@@ -34,6 +38,8 @@ def create_app(data_dir=None, provider_factory=Provider):
     computer = Computer(settings)
     provider = provider_factory(settings)
     assistant = Assistant(store, settings, ToolRunner(store, computer), provider)
+    services = assistant.tools
+    emergency = EmergencyHotkey(assistant.cancel)
     scheduler = Scheduler(store, settings)
     session = secrets.token_urlsafe(32)
     static = Path(__file__).parent / "static"
@@ -41,8 +47,12 @@ def create_app(data_dir=None, provider_factory=Provider):
     @asynccontextmanager
     async def lifespan(app):
         store.recover()
+        emergency.start()
+        discovery = asyncio.create_task(asyncio.to_thread(services.applications.refresh)) if services.applications.adapter.supported else None
         timer = asyncio.create_task(scheduler.loop())
         yield
+        assistant.cancel()
+        emergency.close()
         timer.cancel()
         try:
             await timer
@@ -50,11 +60,15 @@ def create_app(data_dir=None, provider_factory=Provider):
             pass
         if assistant.jobs:
             await asyncio.gather(*assistant.jobs, return_exceptions=True)
+        if discovery:
+            with contextlib.suppress(Exception): await discovery
+        await asyncio.to_thread(services.browser.close)
         store.db.close()
 
     app = FastAPI(title="JARVIS", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.settings = store, settings
     app.state.assistant, app.state.scheduler = assistant, scheduler
+    app.state.tools = services
 
     @app.middleware("http")
     async def local_access(request, call_next):
@@ -98,7 +112,9 @@ def create_app(data_dir=None, provider_factory=Provider):
 
     @app.get("/api/status")
     async def status():
-        return {"ok": True, "settings": settings.public(), "drives": computer.drives(), "active": list(assistant.active)}
+        return {"ok": True, "settings": settings.public(), "drives": computer.drives(), "active": list(assistant.active),
+                'applications':services.applications.count(), 'windows_control':services.applications.adapter.supported,
+                'emergency_hotkey':emergency.registered}
 
     @app.get("/api/settings")
     async def get_settings():
@@ -132,8 +148,71 @@ def create_app(data_dir=None, provider_factory=Provider):
     @app.get("/api/conversations/{conversation_id}")
     async def history(conversation_id: str):
         existing(conversation_id)
+        workflow = store.row('SELECT * FROM workflows WHERE conversation_id=? ORDER BY created_at DESC LIMIT 1',(conversation_id,))
         return {"messages": store.history(conversation_id), "approvals": store.pending(conversation_id),
-                "active": conversation_id in assistant.active}
+                "active": conversation_id in assistant.active,
+                'workflow':workflow, 'actions':store.rows('SELECT id,workflow_id,name,status,risk,created_at FROM action_log WHERE workflow_id=? ORDER BY created_at',(workflow['id'],)) if workflow else []}
+
+    @app.post('/api/cancel')
+    async def cancel_all():
+        return assistant.cancel()
+
+    @app.post('/api/conversations/{conversation_id}/cancel')
+    async def cancel_conversation(conversation_id: str):
+        existing(conversation_id)
+        return assistant.cancel(conversation_id)
+
+    @app.get('/api/activity')
+    async def activity():
+        workflows = store.rows('SELECT * FROM workflows ORDER BY created_at DESC LIMIT 30')
+        actions = store.rows('SELECT * FROM action_log ORDER BY created_at DESC LIMIT 120')
+        for workflow in workflows: workflow['plan'] = json.loads(workflow['plan'])
+        for action in actions:
+            action['arguments'] = json.loads(action['arguments'])
+            action['result'] = json.loads(action['result']) if action['result'] else None
+            action['undo_available'] = bool(store.row("SELECT action_id FROM file_changes WHERE action_id=? AND status='available'",(action['id'],)))
+        return {'workflows':workflows,'actions':actions,'active':list(assistant.active),'emergency_hotkey':emergency.registered}
+
+    @app.get('/api/applications')
+    async def applications(q: str = '', refresh: bool = False):
+        report = await asyncio.to_thread(services.applications.refresh, refresh)
+        matches = await asyncio.to_thread(services.applications.search, q)
+        return {**report, 'applications':matches, 'supported':services.applications.adapter.supported,
+                'aliases':store.rows('SELECT * FROM application_aliases ORDER BY alias')}
+
+    @app.post('/api/applications/alias')
+    async def application_alias(body: dict):
+        if set(body) != {'alias','application_id'} or not all(isinstance(v,str) for v in body.values()): raise ValueError('Specify an alias and application id')
+        return services.applications.alias(**body)
+
+    @app.post('/api/applications/{application_id}/test')
+    async def test_application(application_id: str):
+        if assistant.active: raise ValueError('Wait for the current task to finish, or cancel it first')
+        app_info = services.applications.resolve(application_id)
+        if app_info.get('ambiguous'): raise ValueError('Select one specific indexed app')
+        conversation = store.conversation('Application launch check: ' + app_info['name'])
+        context = RunContext(store,conversation['id'],'Launch and verify ' + app_info['name'],seconds=settings.values['workflow_timeout'])
+        args = {'name':app_info['id']}
+        preview = services.preflight('launch_application',args)
+        decision = services.policy.decide('launch_application',args,preview,context)
+        if decision.confirm:
+            context.finish('blocked','Use the Assistant to review this launch')
+            raise ValueError('This launch requires review. Ask in Assistant so the exact action can be confirmed.')
+        assistant.active.add(conversation['id']); assistant.contexts[conversation['id']] = context
+        action_id = context.log('launch_application',args,decision)
+        try:
+            result = await asyncio.to_thread(services.run,'launch_application',args,preview,conversation['id'],context,action_id)
+            context.logged_result(action_id,result)
+            context.finish('completed' if result.get('verified') else 'failed')
+            return result
+        except Exception as exc:
+            context.logged_result(action_id,{'error':str(exc)},'failed'); context.finish('failed',str(exc)); raise ValueError(str(exc)) from exc
+        finally:
+            assistant.active.discard(conversation['id']); assistant.contexts.pop(conversation['id'],None)
+
+    @app.get('/api/screenshots/{image_id}')
+    async def screenshot(image_id: str):
+        return FileResponse(services.images.path(image_id),media_type='image/jpeg',headers={'Cache-Control':'no-store'})
 
     @app.delete("/api/conversations/{conversation_id}")
     async def delete_conversation(conversation_id: str):

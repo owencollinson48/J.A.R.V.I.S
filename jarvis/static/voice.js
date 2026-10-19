@@ -25,12 +25,22 @@
     return chunks;
   }
 
+  function stopIntent(text) {
+    const value = text.toLowerCase().replace(/[.!?,]/g, '').trim().replace(/^jarvis\s+/, '')
+      .replace(/^(?:can|could|would) you\s+(?:please\s+)?/, '').replace(/^please\s+/, '').replace(/\s+please$/, '');
+    if (/^(?:stop listening|pause listening|end conversation|stop conversation)$/.test(value)) return 'listening';
+    if (/^(?:stop|stop everything|stop working|stop the task|stop task|cancel|cancel it|cancel that|cancel task|cancel the task|hold on|hang on)$/.test(value)) return 'task';
+    return null;
+  }
+
   class VoiceSession {
     constructor(options) {
       this.makeRecognition = options.makeRecognition;
       this.synthesis = options.synthesis;
       this.makeUtterance = options.makeUtterance;
       this.onTurn = options.onTurn;
+      this.onCancel = options.onCancel;
+      this.onBoundary = options.onBoundary || (() => {});
       this.onState = options.onState || (() => {});
       this.onTranscript = options.onTranscript || (() => {});
       this.onError = options.onError || (() => {});
@@ -74,6 +84,7 @@
       this.epoch++;
       this.clear(this.restartTimer);
       this.haltRecognition();
+      this.stopControlListener();
       this.cancelSpeech();
       this.onTranscript('');
       this.status('off');
@@ -96,6 +107,7 @@
       const blocker = this.getBlocker();
       if (blocker === 'paused') {
         this.haltRecognition();
+        this.stopControlListener();
         this.cancelSpeech();
         this.status('paused');
       } else if (this.speaking) {
@@ -103,6 +115,7 @@
       } else if (this.processing || blocker) {
         this.haltRecognition();
         this.status(this.processing ? 'thinking' : blocker);
+        if (this.processing) this.scheduleControlListener();
       } else if (!this.recognition) {
         this.clear(this.restartTimer);
         this.status('starting');
@@ -167,9 +180,15 @@
 
     async commit(text = this.transcript) {
       if (!this.enabled || this.processing || this.speaking || this.getBlocker() || !text.trim()) return;
-      const normalized = text.toLowerCase().replace(/[.!?,]/g, '').trim();
-      if (/^(?:jarvis\s+)?(?:stop listening|pause listening|end conversation|stop conversation)$/.test(normalized)) {
+      const intent = stopIntent(text);
+      if (intent === 'listening') {
         this.stop();
+        return;
+      }
+      if (intent === 'task' && this.onCancel) {
+        this.haltRecognition();
+        try { await this.onCancel(); } catch (_) { this.onError('Could not request cancellation. Use Stop task or the Windows emergency hotkey.'); }
+        this.refreshContext();
         return;
       }
       const epoch = this.epoch;
@@ -187,13 +206,17 @@
 
     beginTurn() {
       this.processing = true;
+      this.cancelRequested = false;
       this.haltRecognition();
+      this.stopControlListener();
       this.cancelSpeech();
       if (this.enabled) this.status('thinking');
+      this.scheduleControlListener();
     }
 
     async finishTurn(result) {
       this.processing = false;
+      this.stopControlListener();
       if (result.error) {
         if (this.enabled) this.stop(result.error);
         return;
@@ -218,6 +241,7 @@
 
     speak(text) {
       this.haltRecognition();
+      this.stopControlListener();
       this.cancelSpeech();
       const chunks = speechChunks(text);
       if (!chunks.length || !this.synthesis || !this.makeUtterance) {
@@ -248,6 +272,7 @@
           utterance.lang = selected?.lang || 'en-GB';
           utterance.rate = this.getRate();
           utterance.onend = next;
+          utterance.onboundary = event => { if (epoch === this.speechEpoch) this.onBoundary(event); };
           utterance.onerror = () => {
             if (epoch !== this.speechEpoch) return;
             this.stop('Speech playback failed. Check the selected voice in Settings, then try again.');
@@ -266,9 +291,52 @@
       this.cancelSpeech();
       this.refreshContext();
     }
+
+    stopControlListener() {
+      this.clear(this.controlTimer);
+      const microphone = this.controlRecognition;
+      this.controlRecognition = null;
+      if (microphone) { try { microphone.abort(); } catch (_) {} }
+    }
+
+    scheduleControlListener() {
+      if (!this.onCancel || !this.enabled || !this.processing || this.speaking || this.cancelRequested || this.controlRecognition) return;
+      const blocker = this.getBlocker();
+      if (blocker && blocker !== 'thinking') return;
+      this.clear(this.controlTimer);
+      this.controlTimer = this.delay(() => {
+        if (!this.enabled || !this.processing || this.speaking || this.cancelRequested || (this.getBlocker() && this.getBlocker() !== 'thinking')) return;
+        try {
+          const microphone = this.makeRecognition();
+          this.controlRecognition = microphone;
+          microphone.lang = 'en-GB'; microphone.continuous = true; microphone.interimResults = false;
+          const current = () => this.controlRecognition === microphone && this.enabled && this.processing;
+          microphone.onstart = () => { if (current()) this.status('thinking'); };
+          microphone.onresult = event => {
+            if (!current()) return;
+            const latest = event.results[event.results.length - 1];
+            if (!latest || latest.isFinal === false) return;
+            const intent = stopIntent(latest[0].transcript);
+            if (intent === 'listening') { this.stop(); return; }
+            if (intent !== 'task') return; // Task-time microphone accepts cancellation only.
+            this.cancelRequested = true;
+            this.stopControlListener();
+            Promise.resolve(this.onCancel()).catch(() => this.onError('Could not request cancellation. Use Stop task or the Windows emergency hotkey.'));
+          };
+          microphone.onend = () => { if (current()) { this.controlRecognition = null; this.scheduleControlListener(); } };
+          microphone.onerror = event => {
+            if (!current()) return;
+            this.stopControlListener();
+            if (event.error === 'no-speech') this.scheduleControlListener();
+            else this.onError('Voice cancellation is unavailable. Use Stop task, Escape, or Ctrl+Alt+F8.');
+          };
+          microphone.start();
+        } catch (_) { this.stopControlListener(); this.onError('Voice cancellation could not start. Use Stop task or Ctrl+Alt+F8.'); }
+      }, this.restartMs);
+    }
   }
 
-  const exported = {VoiceSession, chooseVoice, speechChunks};
+  const exported = {VoiceSession, chooseVoice, speechChunks, stopIntent};
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
   else root.JarvisVoice = exported;
 })(typeof window !== 'undefined' ? window : globalThis);

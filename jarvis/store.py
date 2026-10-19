@@ -58,7 +58,21 @@ class Store:
           name TEXT NOT NULL, arguments TEXT NOT NULL, preview TEXT NOT NULL,
           status TEXT DEFAULT 'pending', result TEXT, created_at TEXT NOT NULL,
           FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS workflows (
+          id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL,
+          plan TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS action_log (
+          id TEXT PRIMARY KEY, workflow_id TEXT, conversation_id TEXT NOT NULL, name TEXT NOT NULL,
+          arguments TEXT NOT NULL, risk TEXT NOT NULL, status TEXT NOT NULL, result TEXT NOT NULL,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE);
         """)
+        columns = {row[1] for row in self.db.execute('PRAGMA table_info(approvals)')}
+        if 'workflow_id' not in columns:
+            self.db.execute('ALTER TABLE approvals ADD COLUMN workflow_id TEXT')
+        if 'action_id' not in columns:
+            self.db.execute('ALTER TABLE approvals ADD COLUMN action_id TEXT')
         self.db.commit()
 
     def rows(self, query, args=()):
@@ -166,6 +180,8 @@ class Store:
         return items
 
     def recover(self):
+        self.execute("UPDATE workflows SET status='interrupted',detail='JARVIS restarted; inspect results before retrying',updated_at=? WHERE status='running'", (now(),))
+        self.execute("UPDATE action_log SET status='interrupted',updated_at=? WHERE status='running'", (now(),))
         # Never repeat a command after a crash: its side effect may already have happened.
         running = self.rows("SELECT * FROM approvals WHERE status='running'")
         for item in running:
@@ -176,7 +192,7 @@ class Store:
         for conversation in self.rows("SELECT id FROM conversations"):
             history = self.model_history(conversation["id"])
             answered = {m.get("tool_call_id") for m in history if m["role"] == "tool"}
-            pending = {a["tool_call_id"] for a in self.pending(conversation["id"])}
+            pending = {a['tool_call_id'] for a in self.rows("SELECT tool_call_id FROM approvals WHERE conversation_id=? AND status IN ('pending','deferred')",(conversation['id'],))}
             for message in history:
                 for call in message.get("tool_calls", []):
                     if call["id"] not in answered | pending:

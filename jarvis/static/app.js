@@ -29,6 +29,7 @@ hydrateIcons();
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const state = {view:'chat', conversation:null, conversations:[], tasks:[], goals:[], reminders:[], memories:[], settings:null, busy:false, planner:'tasks', approvals:[], currentPath:'', previewPath:'', editing:null, speaking:localStorage.getItem('jarvis-speak') === 'true', notified:new Set(), refreshing:false};
 let voiceSession = null;
+Object.assign(state, {active:[], workflow:null, flowActions:[], applications:[], appRequest:0});
 let toastTimer;
 function toast(text) { $('#toast').textContent = text; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 4200); }
 async function api(path, options = {}) {
@@ -62,13 +63,16 @@ function showView(view) {
   state.view = view;
   $$('.main-column > main').forEach(el => { el.hidden = el.id !== view + '-view'; });
   $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.view === view));
-  $('#view-title').textContent = {chat:'Assistant', planner:'My planner', files:'Computer', memory:'Memory', settings:'Settings'}[view];
+  $('#view-title').textContent = {chat:'Assistant', planner:'My planner', files:'Computer', memory:'Memory', settings:'Settings', applications:'Applications', activity:'Activity'}[view];
   $('#sidebar').classList.remove('open');
   if (view === 'files' && !state.currentPath) loadFiles();
   if (view === 'planner') renderPlanner();
   if (view === 'memory') renderMemories();
   if (view === 'settings') populateSettings();
+  if (view === 'applications') loadApplications().catch(errorToast);
+  if (view === 'activity') loadActivity().catch(errorToast);
   voiceSession?.refreshContext();
+  if(view==='activity') JarvisHUD.updateWorkflow(state.workflow,state.flowActions);
 }
 $$('[data-view]').forEach(el => el.addEventListener('click', () => showView(el.dataset.view)));
 $$('[data-open-view]').forEach(el => el.addEventListener('click', () => showView(el.dataset.openView)));
@@ -90,6 +94,7 @@ function newChat() {
   if (state.busy) { toast('Let this conversation finish first.'); return; }
   voiceSession?.stop();
   state.conversation = null; state.approvals = []; localStorage.removeItem('jarvis-conversation');
+  state.workflow = null; state.flowActions = []; renderWorkflow();
   $('#messages').innerHTML = ''; $('#approval-list').innerHTML = ''; $('#welcome').hidden = false; $('#chat-error').hidden = true;
   renderConversations(); showView('chat'); $('#chat-input').focus();
 }
@@ -113,6 +118,7 @@ async function loadConversation(id, force = false) {
   if (state.conversation !== id) voiceSession?.stop();
   const history = await api('/conversations/' + id);
   state.conversation = id; localStorage.setItem('jarvis-conversation', id); state.approvals = history.approvals;
+  state.workflow = history.workflow || null; state.flowActions = history.actions || []; renderWorkflow();
   $('#messages').innerHTML = ''; $('#welcome').hidden = voiceSession?.enabled || history.messages.some(m => ['user','assistant'].includes(m.role) && m.content);
   history.messages.filter(m => ['user','assistant'].includes(m.role) && m.content).forEach(m => appendMessage(m.role, m.content));
   renderApprovals(); renderConversations(); showView('chat'); scrollChat();
@@ -126,7 +132,7 @@ function scheduleRecovery(id) {
     try { const data = await api('/conversations/' + id); if (data.active) scheduleRecovery(id); else await loadConversation(id); } catch(e) { errorToast(e); }
   }, 1800);
 }
-function setBusy(value) { state.busy = value; $('#send-button').disabled = value; $('#chat-input').disabled = value; $('#new-chat').disabled = value; $$('[data-approval]').forEach(el => el.disabled = value); voiceSession?.refreshContext(); }
+function setBusy(value) { JarvisHUD.setBusy(value); state.busy = value; $('#send-button').disabled = value; $('#chat-input').disabled = value; $('#new-chat').disabled = value; $$('[data-approval]').forEach(el => el.disabled = value); updateStopButton(); voiceSession?.refreshContext(); }
 function showWorking(text) {
   let el = $('#working');
   if (!el) { el = document.createElement('div'); el.id = 'working'; el.className = 'working'; $('#messages').append(el); }
@@ -152,10 +158,14 @@ async function stream(path, body) {
         if (event.type === 'token') { $('#working')?.remove(); if (!current) current = appendMessage('assistant', '', true); partial += event.text; $('.message-text', current).textContent = partial; scrollChat(); }
         if (event.type === 'message') { if (current) { current.classList.remove('streaming'); $('.message-text', current).innerHTML = formattedText(event.content); } else if (event.content) appendMessage('assistant', event.content); outcome.text = event.content; current = null; partial = ''; }
         if (event.type === 'status') { showWorking(event.text); scrollChat(); }
-        if (event.type === 'tool') { showWorking(event.ok ? `${event.name.replaceAll('_',' ')} · done` : `${event.name.replaceAll('_',' ')} · not completed`); }
+        if (event.type === 'workflow') { if(state.workflow?.id !== event.id) state.flowActions = []; state.workflow = {id:event.id,status:event.status,request:body.content || 'Continuing your task',plan:[]}; state.active = [state.conversation]; renderWorkflow(); updateStopButton(); }
+        if (event.type === 'plan') { state.workflow = {...state.workflow,detail:event.outcome,plan:event.steps}; renderWorkflow(); $('#workflow-card').open = true; }
+        if (event.type === 'action') { const update=event.action; const index=state.flowActions.findIndex(action=>action.id===update.id); if(index<0) state.flowActions.push(update); else state.flowActions[index]={...state.flowActions[index],...update}; renderWorkflow(); }
+        if (event.type === 'tool') { const action=state.flowActions.find(action=>action.id===event.action_id); if(action) action.status=event.status || (event.ok?'completed':'failed'); renderWorkflow(); showWorking(event.ok ? `${event.name.replaceAll('_',' ')} · done` : `${event.name.replaceAll('_',' ')} · not completed`); }
         if (event.type === 'approval') { state.approvals.push(event.approval); renderApprovals(); scrollChat(); }
         if (event.type === 'error') { outcome.error = event.message; $('#chat-error').textContent = event.message; $('#chat-error').hidden = false; }
-        if (event.type === 'done') doneEvent = true;
+        if (event.type === 'cancelled') { outcome.text = event.message; outcome.cancelled = true; showWorking('Task cancelled'); }
+        if (event.type === 'done') { doneEvent = true; state.active = []; }
       }
     }
     if (!doneEvent) throw new Error('Connection interrupted. Refresh this conversation to see the saved result.');
@@ -165,6 +175,7 @@ async function stream(path, body) {
     try { if (state.conversation) await loadConversation(state.conversation, true); if (view !== 'chat') showView(view); await refresh(); }
     catch (error) { outcome.error ||= error.message; errorToast(error); }
     outcome.approvals = state.approvals.length;
+    updateStopButton();
     if (state.view === 'chat' && !voiceSession?.enabled) $('#chat-input').focus();
   }
   return outcome;
@@ -172,7 +183,7 @@ async function stream(path, body) {
 async function deliverReply(result, wasHandsfree) {
   const handledBySession = voiceSession.enabled;
   await voiceSession.finishTurn(result);
-  if (!handledBySession && !wasHandsfree && !voiceSession.enabled && state.speaking && result.text && !result.error) await voiceSession.speak(result.text);
+  if (!handledBySession && !wasHandsfree && !voiceSession.enabled && state.speaking && result.text && !result.error && !result.cancelled) await voiceSession.speak(result.text);
 }
 async function sendMessage(text, {manageVoice = true} = {}) {
   const content = (text ?? $('#chat-input').value).trim();
@@ -199,6 +210,7 @@ function renderApprovals() {
   $('#approval-list').innerHTML = state.approvals.map(a => `<section class="approval-card"><h3>${icon('shield')} Your approval is needed</h3><p>${escapeHTML(a.preview.summary)}</p><pre>${escapeHTML(JSON.stringify(a.arguments, null, 2))}</pre>${a.preview.docx_note ? `<p>${escapeHTML(a.preview.docx_note)}</p>` : ''}<p>This action will run on your computer. Existing documents are backed up before replacement.</p><div class="approval-actions"><button class="secondary-button" data-approval="${a.id}" data-decision="false">Decline</button><button class="primary-button" data-approval="${a.id}" data-decision="true">Approve action <span>↗</span></button></div></section>`).join('');
   $$('[data-approval]').forEach(el => { el.disabled = state.busy; el.onclick = async () => { if (state.busy) return; const wasHandsfree = voiceSession.enabled; voiceSession.beginTurn(); const result = await stream('/approvals/' + el.dataset.approval, {approved:el.dataset.decision === 'true'}); await deliverReply(result, wasHandsfree); }; });
   voiceSession?.refreshContext();
+  updateStopButton();
 }
 
 async function refresh() {
@@ -209,6 +221,7 @@ async function refresh() {
     Object.assign(state, {tasks, goals, reminders, memories, conversations}); renderRail(); renderConversations();
     if (state.view === 'planner') renderPlanner();
     if (state.view === 'memory') renderMemories();
+    if (state.view === 'activity') await loadActivity();
     notifyDue();
   } finally { state.refreshing = false; }
 }
@@ -319,6 +332,9 @@ function populateSettings() {
   $('#provider-key').placeholder = s.has_api_key ? 'Key saved · leave blank to keep' : 'Enter a key to connect';
   $('#access-roots').value = s.roots.join('\n'); $('#user-name').value = s.name;
   $('#native-notifications').checked = s.native_notifications;
+  $('#permissions-mode').value = s.permissions_mode || 'routine';
+  $('#workflow-timeout').value = s.workflow_timeout || 300;
+  $('#application-directories').value = (s.application_directories || []).join('\n');
   $('#storage-path').textContent = 'Local data: ' + s.data_dir;
   $('#provider-pill').textContent = s.provider_ready ? 'Configured' : 'Not connected'; $('#provider-pill').classList.toggle('connected', s.provider_ready);
 }
@@ -327,9 +343,10 @@ function updateConnectionUI() {
   $('#model-status').textContent = s.provider_ready ? `${s.model} · Configured and ready to connect` : 'Your workspace is ready · Connect a model to chat';
   $('#model-light').classList.toggle('off', !s.provider_ready);
   $('#profile-name').textContent = s.name || 'Your workspace'; $('#profile-initial').textContent = (s.name || 'You')[0].toUpperCase();
+  $('#permission-note').textContent = s.permissions_mode === 'review' ? 'Computer actions wait for your review.' : 'Requested routine actions run automatically. Significant consequences ask first.';
 }
 async function saveSettings() {
-  const body = {provider_url:$('#provider-url').value.trim(), model:$('#provider-model').value.trim(), roots:$('#access-roots').value.split('\n').map(v => v.trim()).filter(Boolean), name:$('#user-name').value.trim(), native_notifications:$('#native-notifications').checked};
+  const body = {provider_url:$('#provider-url').value.trim(), model:$('#provider-model').value.trim(), roots:$('#access-roots').value.split('\n').map(v => v.trim()).filter(Boolean), name:$('#user-name').value.trim(), native_notifications:$('#native-notifications').checked, permissions_mode:$('#permissions-mode').value, workflow_timeout:Number($('#workflow-timeout').value), application_directories:$('#application-directories').value.split('\n').map(v => v.trim()).filter(Boolean)};
   if ($('#provider-key').value) body.api_key = $('#provider-key').value.trim();
   state.settings = await patch('/settings', body); $('#provider-key').value = ''; updateConnectionUI(); populateSettings(); return state.settings;
 }
@@ -367,17 +384,22 @@ voiceSession = new JarvisVoice.VoiceSession({
   makeUtterance: window.SpeechSynthesisUtterance ? text => new SpeechSynthesisUtterance(text) : null,
   getVoice: replyVoice,
   getRate: replyRate,
+  onCancel: () => requestCancellation(false),
+  onBoundary: () => JarvisHUD.pulse(),
   getBlocker: () => document.hidden || state.view !== 'chat' || $('#item-dialog').open ? 'paused' : state.busy ? 'thinking' : state.approvals.length ? 'approval' : null,
   onTurn: text => sendMessage(text, {manageVoice:false}),
   onTranscript: text => { $('#voice-transcript').textContent = text || 'Speak naturally. I’ll reply, then listen again.'; },
   onError: toast,
   onState: ({enabled, phase}) => {
+    JarvisHUD.setVoice({enabled,phase});
     document.body.dataset.voicePhase = phase;
     $('#voice-session').hidden = !enabled;
     $('#voice-skip').hidden = phase !== 'speaking';
     $('#voice-session-status').textContent = {starting:'Opening microphone…', listening:'I’m listening', thinking:'Thinking…', speaking:'Speaking', approval:'Waiting for your approval', paused:'Voice paused', off:'Voice off'}[phase] || phase;
     if (phase === 'listening') $('#voice-transcript').textContent = 'Go ahead. I’m listening.';
+    if (phase === 'speaking') $('#voice-transcript').textContent = 'I’ll listen again after this reply.';
     if (phase === 'approval') $('#voice-transcript').textContent = 'Review the action in chat. Listening resumes after it is resolved.';
+    if (phase === 'thinking') $('#voice-transcript').textContent = 'Working on your request. Say “cancel task” to stop.';
     if (phase === 'paused') $('#voice-transcript').textContent = 'Return to the Assistant tab to continue.';
     $('#welcome').hidden = enabled || !!$('#messages .message');
     $$('[data-voice-toggle]').forEach(el => { el.setAttribute('aria-pressed', String(enabled)); el.setAttribute('aria-label', enabled ? 'End hands-free conversation' : 'Start hands-free conversation'); });
@@ -426,10 +448,83 @@ $('#voice-rate').oninput = () => { localStorage.setItem('jarvis-voice-rate', $('
 $('#voice-preview').onclick = () => voiceSession.speak('Good evening. I’m JARVIS, your personal assistant. What shall we work on together?').catch(errorToast);
 window.speechSynthesis?.addEventListener('voiceschanged', populateVoiceChoices);
 populateVoiceChoices(); voiceSession.status('off');
+function updateStopButton() { $('#emergency-stop').hidden = !(state.busy || state.active.length || state.approvals.length); }
+async function requestCancellation(endVoice = true) {
+  if (endVoice) voiceSession.stop();
+  try {
+    await post('/cancel'); toast('Stop requested. Completed actions remain in Activity.');
+    if (state.busy) showWorking('Stopping task…');
+    else { state.active = []; if (state.conversation) await loadConversation(state.conversation); updateStopButton(); }
+    if (state.view === 'activity') await loadActivity();
+  } catch (error) { toast('Could not reach the stop control: ' + error.message + '. You can stop JARVIS with Ctrl+C in its terminal.'); }
+}
+$('#emergency-stop').onclick = () => requestCancellation();
+document.addEventListener('keydown', event => {
+  if ((event.key === 'Escape' && !$('#item-dialog').open && (state.busy || state.active.length || state.approvals.length)) || (event.key === 'F8' && event.ctrlKey && event.altKey)) {
+    event.preventDefault(); requestCancellation();
+  }
+});
+function renderWorkflow() {
+  const workflow = state.workflow;
+  JarvisHUD.updateWorkflow(workflow,state.flowActions);
+  $('#workflow-card').hidden = !workflow;
+  if (!workflow) return;
+  let plan = workflow.plan || []; if (typeof plan === 'string') { try {plan = JSON.parse(plan);} catch {plan=[];} }
+  $('#workflow-title').textContent = workflow.request || 'Your task';
+  $('#workflow-status').textContent = (workflow.status || 'running').replaceAll('_',' ');
+  $('#workflow-status').dataset.status = workflow.status || 'running';
+  $('#workflow-outcome').textContent = workflow.detail || 'Working through the requested outcome.';
+  $('#workflow-steps').innerHTML = plan.map(step => `<li>${escapeHTML(step)}</li>`).join('');
+  updateStopButton();
+}
+async function loadApplications(force = false) {
+  const token = ++state.appRequest;
+  $('#application-report').textContent = force ? 'Refreshing installed app registrations…' : 'Reading your application index…';
+  $('#refresh-applications').disabled = true;
+  try {
+    const query = $('#application-query').value.trim();
+    const result = await api('/applications?q=' + encodeURIComponent(query) + '&refresh=' + force);
+    if (token !== state.appRequest) return;
+    state.applications = result.applications || [];
+    $('#application-report').textContent = !result.supported ? 'Native app discovery and launch checks work when JARVIS runs on Windows.' : `${result.count} indexed applications. ${result.cached ? 'Using saved index.' : 'Index refreshed.'} ${(result.warnings || []).join(' ')}`;
+    $('#application-list').innerHTML = state.applications.length ? state.applications.map(app => `<article class="application-card"><div class="application-icon">${icon('grid')}</div><div class="application-copy"><h3>${escapeHTML(app.name)}</h3><p>${[...new Set(app.launchers.map(method => method.kind))].map(kind => `<span class="app-method">${escapeHTML(kind)}</span>`).join(' ')}${app.preferred ? `<span class="muted"> · remembered: ${escapeHTML(app.preferred.kind)}</span>` : ''}</p><small>${escapeHTML([...new Set(app.launchers.map(method => method.source))].join(' · '))}</small>${app.last_used ? `<small>Last verified: ${escapeHTML(formatDate(app.last_used))}</small>` : ''}<p id="app-check-${app.id}" role="status" class="app-check-result"></p></div><div class="application-actions"><button type="button" class="secondary-button" data-app-open="${app.id}">Open in Assistant</button><button type="button" class="text-button" data-app-check="${app.id}">Check launch</button></div></article>`).join('') : empty('No matching apps yet', result.supported ? 'Try Refresh index, another app name, or add a portable application folder in Settings.' : 'Open this app on your Windows computer to build its installed application index.', 'grid');
+    $('#alias-application').innerHTML = state.applications.map(app => `<option value="${app.id}">${escapeHTML(app.name)}</option>`).join('');
+    $('#application-aliases').textContent = (result.aliases || []).map(alias => `${alias.alias} → ${state.applications.find(app => app.id === alias.application_id)?.name || alias.application_id.slice(0,8)}`).join(' · ') || 'No custom aliases yet.';
+    $$('[data-app-open]').forEach(button => button.onclick = () => {
+      const app = state.applications.find(app => app.id === button.dataset.appOpen);
+      showView('chat'); sendMessage(`Open ${app.name}. Its installed application id is ${app.id}.`);
+    });
+    $$('[data-app-check]').forEach(button => button.onclick = async () => {
+      button.disabled = true; const label = $('#app-check-' + button.dataset.appCheck); label.textContent = 'Launching and checking for a visible window…';
+      try { const result = await post('/applications/' + button.dataset.appCheck + '/test'); label.textContent = result.verified ? `Verified ${result.already_running ? 'existing window' : 'launch'}${result.focused ? ' · brought to foreground' : ' · Windows did not grant foreground focus'}.` : result.message || 'Launch could not be verified. Check the desktop.'; }
+      catch (error) { label.textContent = error.message; }
+      finally { button.disabled = false; }
+    });
+  } catch (error) { $('#application-report').textContent = error.message; }
+  finally { if (token === state.appRequest) $('#refresh-applications').disabled = false; }
+}
+$('#refresh-applications').onclick = () => loadApplications(true);
+$('#search-applications').onclick = () => loadApplications();
+$('#application-query').onkeydown = event => { if (event.key === 'Enter') loadApplications(); };
+$('#save-application-alias').onclick = async () => {
+  try { await post('/applications/alias', {alias:$('#application-alias').value.trim(), application_id:$('#alias-application').value}); toast('Application preference remembered.'); await loadApplications(); }
+  catch (error) { errorToast(error); }
+};
+async function loadActivity() {
+  const result = await api('/activity');
+  state.active = result.active || []; updateStopButton();
+  const latest=(result.workflows || [])[0];
+  if(latest && (!state.workflow || state.view==='activity')) { state.workflow=latest; state.flowActions=(result.actions||[]).filter(action=>action.workflow_id===latest.id).reverse(); renderWorkflow(); }
+  $('#emergency-status').textContent = result.emergency_hotkey ? 'Emergency stop: Ctrl+Alt+F8 anywhere in Windows. Escape or Stop task also works in JARVIS.' : 'Emergency stop: Escape or Stop task in JARVIS. The global Windows hotkey is unavailable in this session.';
+  $('#workflow-list').innerHTML = (result.workflows || []).slice(0,8).map(workflow => `<details class="workflow-card"><summary><span>${escapeHTML(workflow.request)}</span><span class="pill" data-status="${escapeHTML(workflow.status)}">${escapeHTML(workflow.status.replaceAll('_',' '))}</span></summary><p>${escapeHTML(workflow.detail || '')}</p><ol>${workflow.plan.map(step => `<li>${escapeHTML(step)}</li>`).join('')}</ol><small>${escapeHTML(formatDate(workflow.created_at))}</small></details>`).join('') || empty('A clear record of your work', 'Plans and actions will appear here when you ask JARVIS to do something.', 'clock');
+  $('#action-list').innerHTML = (result.actions || []).map(action => `<details class="action-card"><summary><span>${escapeHTML(action.name.replaceAll('_',' '))}</span><span class="pill" data-status="${escapeHTML(action.status)}">${escapeHTML(action.status.replaceAll('_',' '))}</span></summary><p>${escapeHTML(formatDate(action.created_at))} · ${escapeHTML(action.risk)}</p><pre>${escapeHTML(JSON.stringify({arguments:action.arguments,result:action.result},null,2))}</pre>${action.undo_available ? `<button type="button" class="secondary-button" data-undo-action="${action.id}">Undo this file change</button>` : ''}${action.result?.image_id ? `<a class="text-button" href="/api/screenshots/${escapeHTML(action.result.image_id)}" target="_blank" rel="noopener">View captured window ↗</a>` : ''}</details>`).join('');
+  $$('[data-undo-action]').forEach(button => button.onclick = () => { showView('chat'); sendMessage('Undo the file change with action id ' + button.dataset.undoAction + '.'); });
+}
+$('#refresh-activity').onclick = () => loadActivity().catch(errorToast);
 function errorToast(error) { toast(error.message || String(error)); }
 async function init() {
   try {
-    const status = await api('/status'); state.settings = status.settings; updateConnectionUI();
+    const status = await api('/status'); state.settings = status.settings; state.active = status.active || []; updateConnectionUI(); updateStopButton();
     $('#drive-buttons').innerHTML = status.drives.map(d => `<button type="button" class="secondary-button" data-drive="${escapeHTML(d)}">＋ ${escapeHTML(d)}</button>`).join('');
     $$('[data-drive]').forEach(el => el.onclick = () => { const values = $('#access-roots').value.split('\n'); if (!values.includes(el.dataset.drive)) $('#access-roots').value += '\n' + el.dataset.drive; });
     await refresh();

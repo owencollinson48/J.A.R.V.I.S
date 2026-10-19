@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {VoiceSession, chooseVoice, speechChunks} = require('../jarvis/static/voice.js');
+const {VoiceSession, chooseVoice, speechChunks, stopIntent} = require('../jarvis/static/voice.js');
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -144,4 +144,28 @@ test('skip reply resumes listening and ignores late speech events', async t => {
   utterance.onend(); await wait(15);
   assert.equal(f.session.phase, 'listening');
   assert.equal(f.recognizers.length, 2);
+});
+
+test('task-time microphone accepts cancellation without queuing other instructions', async t => {
+  let complete, cancelled = 0;
+  const f = fixture({onTurn:() => new Promise(resolve => {complete=resolve;}), onCancel:async () => {cancelled++;complete({text:'Task cancelled.',cancelled:true});}});
+  t.after(() => f.session.stop()); f.session.start();
+  const task = f.session.commit('Open Outlook');
+  await wait(15);
+  assert.equal(f.recognizers.length,2);
+  f.recognizers[1].words('Now send that email');
+  assert.equal(cancelled,0);
+  f.recognizers[1].words('Please cancel that');
+  await wait(15);
+  assert.equal(cancelled,1);
+  assert.equal(f.session.phase,'speaking');
+  assert.equal(f.session.controlRecognition,null);
+  f.spoken.at(-1).onend(); await task; await wait(15);
+  assert.equal(f.session.phase,'listening');
+});
+
+test('cancellation intent is conversational and does not match negation or unrelated speech', () => {
+  for (const text of ['Jarvis, cancel task.', 'Could you please stop?', 'hold on', 'Cancel that please']) assert.equal(stopIntent(text),'task');
+  assert.equal(stopIntent('Stop listening'),'listening');
+  for (const text of ['Do not cancel','Cancel my dentist appointment','Stop Spotify','I cannot stop thinking']) assert.equal(stopIntent(text),null);
 });

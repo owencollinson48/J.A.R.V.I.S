@@ -42,7 +42,7 @@ Enter sends a typed message; Shift+Enter adds a new line. **Voice on** reads typ
 
 Use Chrome or Microsoft Edge. Connect a model, then click the **JARVIS circle** (or **Hands-free**) once and allow microphone access. This initial click is needed for browser microphone/audio permissions; after that, speak naturally. A short pause sends your words automatically, JARVIS speaks the reply, and listening resumes without another button press. The circle stays visible with Listening, Thinking, and Speaking states. Say **“stop listening”** to end the session, or use **End conversation**. The microphone is paused while replies play to avoid hearing its own voice. **Skip spoken reply** moves back to listening sooner.
 
-Voice pauses while you use another app page, an item dialog, or a background browser tab. It resumes when you return to the Assistant. Computer actions still wait for on-screen approval. Permission, model, and speech-service errors stop the voice loop with an explanation. This is a hands-free browser session, not a background wake-word service; keep the dashboard open, and start a new voice session after reloading it. Browser recognition may use an online speech service and requires working microphone permissions.
+Voice pauses while you use another app page, an item dialog, or a background browser tab. It resumes when you return to the Assistant. Requested routine actions run automatically; significant consequences pause for on-screen approval. Say **“cancel task”** while JARVIS is working to stop further steps. Permission, model, and speech-service errors stop the voice loop with an explanation. This is a hands-free browser session, not a background wake-word service; keep the dashboard open, and start a new voice session after reloading it. Browser recognition may use an online speech service and requires working microphone permissions.
 
 ### British accent
 
@@ -50,13 +50,27 @@ Open **Settings & connections → Voice & conversation**. JARVIS automatically p
 
 Available voices depend on Windows and your browser. If no British voice appears, add an English (United Kingdom) speech voice under **Windows Settings → Time & language → Speech**, then restart the browser. The app explains when it must fall back to the browser voice. This uses stock speech voices; it does not clone a person's voice.
 
-## Computer access
+## Blue display and live task flow
 
-File tools can list, search, read, create, replace, move, and open files in the folders you select. Text files and Word `.docx` are supported. JARVIS can open Windows apps and execute commands with your account's permissions. App launches, command execution, and file changes show an explicit approval card first. Declining sends the decision back to the assistant.
+The front page uses an animated cyan/blue SVG instrument with concentric rings, fine ticks, radial segments and dots. Rings gently rotate while idle. When you speak, an optional local Web Audio microphone meter drives the radial bars; when JARVIS replies, browser speech word events pulse the display. Browsers without those events still show a speaking animation. Reduced-motion preferences disable the movement. Microphone metering starts only in an active listening session and stops when listening ends or the tab is hidden.
 
-Existing files are copied into the local `backups` directory before replacement. A changed-file fingerprint prevents an edit if the file changed after approval was requested. `.docx` writes rebuild paragraphs and **replace existing formatting, tables, and embedded content**; the original is backed up. PDF, Excel, rich Word editing, mouse/keyboard automation, and an always-listening wake word are not implemented.
+The **Task flow** panel creates connected boxes from real tool events: your request → JARVIS → the actions it performs. Boxes show running, completed, failed, cancelled and awaiting-approval states. A completed input means the tool delivered it; app results and the action log show what was verified. Plans remain separate from executed actions. Switch to **Your day** for the planner sidebar. On small screens, open **Activity** to see the full graph and log. Reloading a conversation restores its latest task and actions.
 
-Folder limits apply to JARVIS file tools. Programs and commands you approve can use your Windows account's wider access. JARVIS does not elevate itself to administrator. This cloud workspace cannot control your Windows PC: run the application on the computer you want it to access.
+## Computer access and autonomy
+
+A direct request authorizes ordinary steps: finding/opening an app, reading allowed files, requested edits and saves, normal browser navigation and accessible UI interaction. Multistep work is planned, executed and checked under a time/action budget. **Settings → Autonomy & confirmation** can instead require review of every computer action. Unrestricted commands, credential access, executable scripts/installers, coordinate clicks and consequential controls such as Send, Delete, Pay or security settings require a final approval. JARVIS does not bypass Windows authentication, UAC or security controls. It runs with your Windows account’s permissions.
+
+**Applications** indexes Start Menu entries and shortcuts, Get-StartApps, installed packages/AUMIDs and protocols, registry App Paths and uninstall display registrations, PATH, Steam/Epic libraries and bounded scans of application folders you approve. It never executes uninstall registry strings. Ask “Open Outlook” or “Show my emails”; ambiguity between installed editions is reported. Use application preferences to map “my emails” to a particular edition. A running matching window is focused first; new activations use the indexed executable, shortcut, URI or AUMID, wait for a matching visible window, then remember successful methods. An activation without a matching window is reported as unverified. **Check launch** tests an indexed ordinary app without an AI connection.
+
+Desktop tools inspect Windows accessibility elements, enter text, navigate, close windows normally and capture a specific window for a vision-capable model. Structured UI Automation is preferred; coordinate fallback requires review. Applications with inaccessible/custom controls, elevated windows or unusual launchers may need your help. Classic Outlook inbox search uses an existing signed-in MAPI session; New Outlook uses accessible UI or the managed browser. No login credentials are extracted. The managed Playwright browser opens installed Microsoft Edge on Windows in a separate persistent profile. Sign in there yourself when needed; JARVIS does not copy your personal browser cookies.
+
+File tools list, search, read, create, edit, move and open files in allowed folders. Text and Word `.docx` are supported. Exact-text and font/spacing edits preserve existing Word tables, images, styles and unaffected runs. Full `.docx` replacement still removes rich content and requires review for an existing file. Files are backed up before replacement, and fingerprints prevent overwriting a file changed during the operation. **Activity → Undo this file change** can restore a backup, reverse a move, or archive a file JARVIS created; it refuses if that file has since changed. PDF and Excel editing are not implemented.
+
+**Stop task**, **Escape** in the dashboard, **Ctrl+Alt+F8** globally on Windows (when registration succeeds), or **“cancel task”** during the task’s listening phase cancels further steps. Cancellation stops owned command processes and interrupts waiting for model output. Native operations already delivered to an app may finish; completed effects remain in Activity and are not automatically reversed. Speech cancellation is paused while JARVIS is speaking to prevent self-echo; use the visible stop button or hotkey then. Moving the mouse to PyAutoGUI’s fail-safe corner also stops pointer automation. Windows may reserve the global hotkey; Activity reports its availability.
+
+File, email, browser and screenshot contents are treated as untrusted task data in model instructions. They cannot supply user authorization. The execution policy derives UI controls from inspected metadata rather than a label supplied by the model. Review important results: a model can still make mistakes interpreting a request or document.
+
+Folder limits apply to file tools. Applications and approved commands use your account’s wider access. This cloud workspace cannot control your Windows PC: run JARVIS on the computer you want it to access.
 
 ## Memory and reminders
 
@@ -68,7 +82,7 @@ Folder limits apply to JARVIS file tools. Programs and commands you approve can 
 
 ## Where data lives
 
-On Windows the default directory is `%LOCALAPPDATA%\JARVIS`. On Linux/macOS it is `~/.local/share/JARVIS`. Set `JARVIS_DATA_DIR` to override it. This directory contains `jarvis.db`, `settings.json`, and `backups/`. Copy the entire directory while JARVIS is stopped to back up your assistant.
+On Windows the default directory is `%LOCALAPPDATA%\JARVIS`. On Linux/macOS it is `~/.local/share/JARVIS`. Set `JARVIS_DATA_DIR` to override it. This directory contains `jarvis.db`, `settings.json`, `backups/`, private screenshots and the separate managed-browser profile. Copy the entire directory while JARVIS is stopped to back up your assistant.
 
 An API key entered in Settings is stored in your local settings file, not the repository. Treat this directory as private. You can instead supply `JARVIS_API_KEY` or `OPENAI_API_KEY` in the process environment. Keys are never returned by the settings API. Local Ollama requests do not receive a saved cloud API key.
 
@@ -95,8 +109,23 @@ With Node.js 18+ installed, run `node --test tests/voice.test.js` for speech tur
 
 For this cloud development workspace, run `bash scripts/setup-cloud.sh`, then `JARVIS_DATA_DIR="$PWD/.jarvis-data" .venv/bin/python run.py --no-browser`. Run `.venv/bin/python scripts/check-ready.py` from another terminal to check the dashboard and authenticated planner API. Cloud validation exercises the app on Linux; native Windows app launches, microphone permissions, and Windows notifications still need testing on your PC.
 
-`jarvis/assistant.py` manages streaming chat and approved tool execution; `provider.py` implements the model protocol; `computer.py` implements local tools; `store.py` provides persistence; `scheduler.py` delivers reminders; `app.py` serves the local API and interface. Tests use a deterministic model fixture; they do not establish live model quality or Windows-native notification behavior.
+`jarvis/assistant.py` manages streaming chat and request-scoped execution; `execution.py` handles policy and logs; `applications.py`, `desktop.py` and `browser.py` implement the Windows and browser adapters; `provider.py` implements the model protocol; `computer.py` implements local tools; `store.py` provides persistence; `scheduler.py` delivers reminders; `app.py` serves the local API and interface. Tests use a deterministic model fixture; they do not establish live model quality or Windows-native notification behavior.
 
 If startup fails, the Windows launcher keeps the error window open. Dependency installation output is saved to `.jarvis-data\setup.log` in the extracted app folder. Share the exact error text when asking for help. If a ZIP was not fully extracted, extract it first. If Python was updated and the old environment no longer works, rename the app folder's `.venv` to `.venv-old` and restart; this leaves your separate JARVIS memory/settings directory untouched. If port 8765 is already in use, close any other JARVIS window, or run `"Start JARVIS.bat" --port 8766` from Command Prompt. `"Start JARVIS.bat" --setup-only` installs dependencies without opening the dashboard.
 
-A missing model key affects chat, while the planner, file browser, and memory editor work independently. If a provider rejects tools, choose a tool-capable model or check its API compatibility. Actions continue to finish if a browser connection drops; reload the conversation to see the saved outcome. Interrupted commands are not automatically rerun on restart.
+A missing model key affects chat, while the planner, file browser, and memory editor work independently. If a provider rejects tools, choose a tool-capable model or check its API compatibility. Work continues if the dashboard connection drops until completion, cancellation, or a task limit; reload the conversation to see the saved outcome. Interrupted commands are not automatically rerun on restart.
+
+### Validation and native Windows checks
+
+Run `.venv/bin/python -m pytest -q` and `node --test tests/voice.test.js`. Browser coverage additionally uses Node Playwright with a Chromium executable: with the local server running, run `node tests/dashboard.browser.cjs`. Set `JARVIS_TEST_BROWSER` to the browser executable on another machine. It tests live-event graph rendering, HUD animation, reduced motion, mobile layout and simulated hands-free turn-taking. Python browser integration tests use real local Chromium when installed; model/desktop tests use deterministic adapters. They do not establish live provider quality, microphone recognition accuracy or native Windows behavior.
+
+Native checks are deliberately opt-in because they open installed apps. In an interactive Windows Command Prompt:
+
+```bat
+set JARVIS_WINDOWS_LIVE=1
+.venv\Scripts\python.exe -m pytest tests/test_windows_live.py -v -s
+```
+
+These enumerate real apps and check visible launches for installed Notepad, Store Calculator and Outlook editions. Missing apps are skipped. Existing windows are never killed; close any test windows yourself. On Linux these checks are skipped. You can also use **Applications → Check launch** on your Windows PC and inspect **Activity** without enabling the native test suite.
+
+Windows ARM64 wheel availability was checked for the pinned native dependencies, including Python 3.15 wheels for pywin32, Pillow and greenlet and stable-ABI psutil. This is a packaging check, not a native Windows execution test. Installer or Smart App Control failures still need the exact error from that computer; no security checks are disabled.
