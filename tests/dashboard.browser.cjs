@@ -21,13 +21,14 @@ async function installSpeech(page) {
  });
 }
 async function installAPI(page, permissionsMode='autonomous', neural=false) {
- const messages=[], pending=[], prompts=[], decisions=[], speechRequests=[], providerRequests=[];let workflow=null,actions=[];
- const provider={check:{status:200,body:{ok:true,message:'Streaming, tools and tool-result follow-up accepted.'}},repair:{status:200,body:{ok:true,changed:false,message:'Current model supports the full workflow.'}},chatError:''};
+ const messages=[], pending=[], prompts=[], decisions=[], speechRequests=[], providerRequests=[], delayedRefresh=[];let workflow=null,actions=[];
+ const provider={check:{status:200,body:{ok:true,message:'Streaming, tools and tool-result follow-up accepted.'}},repair:{status:200,body:{ok:true,changed:false,message:'Current model supports the full workflow.'}},chatError:'',holdRefresh:false};
  const stamp=new Date().toISOString();
  const settings={provider_ready:true,provider_url:'http://localhost:11434/v1',model:'browser-test-fixture',roots:['/tmp'],name:'Owen',has_api_key:false,native_notifications:false,data_dir:'/tmp/voice-test',permissions_mode:permissionsMode,computer_access:'full',workflow_timeout:300,application_directories:[],speech_mode:'auto',speech_voice:'cedar',speech_available:neural,browser_mode:'existing',background_voice:true};
  await page.route('**/api/**',async route=>{
   const req=route.request(), path=new URL(req.url()).pathname.slice(4), method=req.method();
   let data;
+  if(provider.holdRefresh&&method==='GET'&&['/tasks','/goals','/reminders','/memories','/conversations'].includes(path)){delayedRefresh.push(route);return;}
   if(path==='/settings'||path==='/provider/check'||path==='/provider/repair')providerRequests.push({path,method,body:method==='PATCH'?req.postDataJSON():null,model:settings.model});
   if(path==='/provider/check'||path==='/provider/repair'){
    const result=path.endsWith('/repair')?provider.repair:provider.check;
@@ -47,26 +48,26 @@ async function installAPI(page, permissionsMode='autonomous', neural=false) {
    const activity=[{type:'workflow',id:workflow.id,status:'running'},{type:'plan',outcome:content,steps:workflow.plan},...actions.flatMap(a=>[{type:'action',action:{...a,status:'running'}},{type:'tool',action_id:a.id,name:a.name,ok:true,status:'completed'}])];
    if(provider.chatError){
     workflow.status='failed';workflow.detail=provider.chatError;
-    await route.fulfill({contentType:'text/event-stream',body:[...activity,{type:'error',message:provider.chatError},{type:'done'}].map(e=>'data: '+JSON.stringify(e)+'\n\n').join('')});return;
+    await route.fulfill({contentType:'text/event-stream',body:[...activity,{type:'error',message:provider.chatError},{type:'outcome',workflow,approvals:pending},{type:'done'}].map(e=>'data: '+JSON.stringify(e)+'\n\n').join('')});return;
    }
    if(content==='Open Calculator'&&settings.permissions_mode!=='autonomous'){
     const approval={id:'a1',conversation_id:'c1',name:'open_application',arguments:{name:'calculator'},preview:{summary:'Open Calculator'}};
     pending.push(approval);workflow.status='awaiting_confirmation';actions[1].status='awaiting_confirmation';
-    await route.fulfill({contentType:'text/event-stream',body:[...activity,{type:'action',action:actions[1]},{type:'approval',approval},{type:'done'}].map(e=>'data: '+JSON.stringify(e)+'\n\n').join('')});return;
+    await route.fulfill({contentType:'text/event-stream',body:[...activity,{type:'action',action:actions[1]},{type:'approval',approval},{type:'outcome',workflow,approvals:pending},{type:'done'}].map(e=>'data: '+JSON.stringify(e)+'\n\n').join('')});return;
    }
    const text=prompts.length===1?'Good evening, Owen. How can I help?':'Of course. Let us plan your day.';
    messages.push({id:'a'+messages.length,role:'assistant',content:text});
-   await route.fulfill({contentType:'text/event-stream',body:[...activity,{type:'token',text},{type:'message',content:text},{type:'done'}].map(e=>'data: '+JSON.stringify(e)+'\n\n').join('')});return;
+   await route.fulfill({contentType:'text/event-stream',body:[...activity,{type:'token',text},{type:'message',content:text},{type:'outcome',workflow,approvals:pending},{type:'done'}].map(e=>'data: '+JSON.stringify(e)+'\n\n').join('')});return;
   }
   else if(path==='/approvals/a1'){
    decisions.push(req.postDataJSON().approved);pending.length=0;workflow.status='completed';actions[1].status='declined';const text='The action was declined.';messages.push({id:'a'+messages.length,role:'assistant',content:text});
-   await route.fulfill({contentType:'text/event-stream',body:[{type:'message',content:text},{type:'done'}].map(e=>'data: '+JSON.stringify(e)+'\n\n').join('')});return;
+   await route.fulfill({contentType:'text/event-stream',body:[{type:'message',content:text},{type:'outcome',workflow,approvals:pending},{type:'done'}].map(e=>'data: '+JSON.stringify(e)+'\n\n').join('')});return;
   }
   else if(path==='/activity') data={active:[],workflows:workflow?[workflow]:[],actions:actions.slice().reverse(),emergency_hotkey:false};
   else data=[];
   await route.fulfill({json:data});
  });
- return {prompts,decisions,speechRequests,settings,provider,providerRequests};
+ return {prompts,decisions,speechRequests,settings,provider,providerRequests,delayedRefresh,async releaseRefresh(){provider.holdRefresh=false;await Promise.all(delayedRefresh.splice(0).map(route=>route.fulfill({json:[]})));}};
 }
 function audioFixture(){
  const rate=16000,seconds=2,samples=rate*seconds,buffer=Buffer.alloc(44+samples*2);
@@ -181,6 +182,20 @@ const navigate=async(page,view)=>{await page.locator('#menu-button').click();awa
   await natural.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>false});document.dispatchEvent(new Event('visibilitychange'));});await phase(natural,'listening');
   await natural.locator('#front-voice-stop').click();await phase(natural,'off');assert.deepEqual(naturalErrors,[]);
 
+  // Verified reply playback must not wait for unrelated sidebar requests.
+  const quick=await browser.newPage({viewport:{width:1440,height:1000}}),quickErrors=[];
+  quick.on('pageerror',error=>quickErrors.push(error.message));
+  await installSpeech(quick);const quickAPI=await installAPI(quick);
+  await quick.goto(process.env.JARVIS_TEST_URL || 'http://127.0.0.1:8765');await quick.waitForFunction(()=>document.querySelector('#model-status').textContent.includes('browser-test-fixture'));
+  await quick.locator('#jarvis-hud').click();await phase(quick,'listening');
+  quickAPI.provider.holdRefresh=true;
+  await words(quick,'Hello without waiting for the sidebar');await phase(quick,'speaking');
+  assert.ok(quickAPI.delayedRefresh.length>0,'the sidebar remains pending when speech starts');
+  assert.equal(await quick.evaluate(()=>window.testSpoken.length),1);
+  assert.equal(await quick.locator('#flow-rail .flow-hub').getAttribute('data-status'),'completed','stream supplies the observed final workflow without fetching history');
+  await quickAPI.releaseRefresh();await finish(quick);await phase(quick,'listening');
+  await quick.locator('#front-voice-stop').click();await phase(quick,'off');assert.deepEqual(quickErrors,[]);
+
   // Diagnose the actual provider error and repair only after a model passes the
   // backend's checks. A failed continuation must remain visible in the task flow
   // without opening the conversation drawer on the minimal home screen.
@@ -229,6 +244,6 @@ const navigate=async(page,view)=>{await page.locator('#menu-button').click();awa
   await diagnostics.reload();await diagnostics.waitForFunction(()=>document.querySelector('#flow-rail .flow-hub')?.dataset.status==='failed');
   await home(diagnostics);assert.equal(await diagnostics.locator('#flow-rail .flow-hub small').textContent(),providerFailure);
   assert.deepEqual(diagnosticErrors,[]);
-  console.log('Dashboard E2E passed: minimal circle/flow front page, hidden transcript during speech, transcript drawer without microphone interruption, front-page speech controls, autonomous requests without approval, optional routine approval pause/decline/resume, animated HUD, live connected graph on desktop/mobile, reduced motion, three spoken turns, UK voice selection, no self-echo, spoken stop, saved voice/rate, real blob audio playback and neural turn-taking, no auto-mic after reload, permission failure, exact connection diagnostics, compatible model repair, failed continuation remains visible in flow while home stays clean; no page errors.');
+  console.log('Dashboard E2E passed: minimal circle/flow front page, hidden transcript during speech, transcript drawer without microphone interruption, front-page speech controls, autonomous requests without approval, optional routine approval pause/decline/resume, animated HUD, live connected graph on desktop/mobile, reduced motion, three spoken turns, UK voice selection, no self-echo, spoken stop, saved voice/rate, real blob audio playback and neural turn-taking, no auto-mic after reload, permission failure, exact connection diagnostics, compatible model repair, failed continuation remains visible in flow while home stays clean; reply playback before delayed sidebar refresh; no page errors.');
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

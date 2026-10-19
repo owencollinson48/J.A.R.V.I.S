@@ -360,5 +360,12 @@ class Computer:
 
     def drives(self):
         if platform.system() == "Windows":
-            return [f"{chr(letter)}:\\" for letter in range(65, 91) if Path(f"{chr(letter)}:\\").exists()]
+            import ctypes
+            # Enumerate configured drive letters without touching removable or
+            # disconnected network paths during every model/context request.
+            query = ctypes.WinDLL('kernel32', use_last_error=True).GetLogicalDrives
+            query.argtypes = []
+            query.restype = ctypes.c_uint32
+            mask = query()
+            return [f"{chr(65+index)}:\\" for index in range(26) if mask & (1 << index)]
         return [str(Path('/'))]

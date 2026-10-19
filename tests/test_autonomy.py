@@ -35,7 +35,7 @@ class FakeWindows:
         if launcher['kind'] in self.failures: raise OSError('Activation failed')
         entry = next(e for e in self.entries if launcher in e['launchers'])
         pid = 123 + len(self.activations)
-        self.visible.append({'id':100 + len(self.visible),'title':entry['name'],'pid':pid,'executable':entry['executables'][0] if entry['executables'] else '', 'process':Path(entry['executables'][0].replace('\\','/')).name if entry['executables'] else ''})
+        self.visible.append({'id':100 + len(self.visible),'title':entry['name'],'pid':pid,'executable':entry['executables'][0] if entry['executables'] else '', 'process':Path(entry['executables'][0].replace('\\','/')).name if entry['executables'] else entry['name'].replace(' ','')+'.exe', 'aumid':next((method['target'] for method in entry['launchers'] if method['kind']=='aumid'),'')})
         return pid
 
 

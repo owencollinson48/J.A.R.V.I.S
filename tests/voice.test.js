@@ -169,3 +169,27 @@ test('cancellation intent is conversational and does not match negation or unrel
   assert.equal(stopIntent('Stop listening'),'listening');
   for (const text of ['Do not cancel','Cancel my dentist appointment','Stop Spotify','I cannot stop thinking']) assert.equal(stopIntent(text),null);
 });
+
+test('completed recognition turns use a shorter pause while continued words reset submission', async t => {
+  let now=0, sequence=0;
+  const timers=new Map();
+  const delay=(callback,ms)=>{const id=++sequence;timers.set(id,{callback,at:now+ms});return id;};
+  const clear=id=>timers.delete(id);
+  const advance=async milliseconds=>{
+    now+=milliseconds;
+    for(const [id,timer] of [...timers]) if(timer.at<=now) {timers.delete(id);timer.callback();}
+    await Promise.resolve();
+  };
+  const f=fixture({delay,clear,silenceMs:1200}); t.after(()=>f.session.stop());
+  f.session.start();
+  f.recognizers[0].words('Open',false);
+  await advance(700); assert.deepEqual(f.turns,[]);
+  f.recognizers[0].words('Open Spotify');
+  await advance(600); assert.deepEqual(f.turns,[]);
+  f.recognizers[0].words('Open Spotify and bring it forward');
+  await advance(649); assert.deepEqual(f.turns,[]);
+  await advance(1);
+  assert.deepEqual(f.turns,['Open Spotify and bring it forward']);
+  f.recognizers[0].onend(); await advance(1200);
+  assert.equal(f.turns.length,1);
+});

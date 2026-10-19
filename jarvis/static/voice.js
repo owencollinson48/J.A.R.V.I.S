@@ -53,6 +53,7 @@
       this.delay = options.delay || ((callback, ms) => setTimeout(callback, ms));
       this.clear = options.clear || (id => clearTimeout(id));
       this.silenceMs = options.silenceMs ?? 1200;
+      this.finalSilenceMs = options.finalSilenceMs ?? Math.min(this.silenceMs, 650);
       this.restartMs = options.restartMs ?? 400;
       this.enabled = false;
       this.processing = false;
@@ -146,7 +147,8 @@
           this.transcript = Array.from(event.results).map(result => result[0].transcript).join(' ').trim();
           this.onTranscript(this.transcript);
           this.clear(this.silenceTimer);
-          if (this.transcript) this.silenceTimer = this.delay(() => this.commit(), this.silenceMs);
+          const final = Array.from(event.results).every(result => result.isFinal === true);
+          if (this.transcript) this.silenceTimer = this.delay(() => this.commit(), final ? this.finalSilenceMs : this.silenceMs);
         };
         recognition.onend = () => {
           if (!current()) return;

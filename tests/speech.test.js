@@ -70,11 +70,14 @@ test('long replies prefetch the following passage during playback without droppi
   const task = f.player.play(text); await tick();
   assert.equal(f.requests.length,2);
   assert.equal(f.audios.length,1);
-  f.audios[0].onended(); await tick();
-  assert.equal(f.audios.length,2);
-  f.audios[1].onended(); await task;
+  const segments = speechSegments(text);
+  for (let index=0;index<segments.length;index++) {
+    assert.equal(f.audios.length,index+1);
+    f.audios[index].onended(); await tick();
+  }
+  await task;
   assert.equal(f.requests.map(request=>JSON.parse(request.body).text).join(' '),text);
-  assert.equal(f.revoked.length,2);
+  assert.equal(f.revoked.length,segments.length);
 });
 
 test('cancellation aborts in-flight generation and suppresses late audio', async () => {
@@ -161,7 +164,7 @@ test('a later generation failure falls back only for passages that have not fini
   const p = playerFixture({fetch:async()=>++calls===1?response():{ok:false}}), f = voiceFixture(p.player);
   t.after(()=>f.session.stop());
   const text = 'Already spoken naturally. '.repeat(150) + 'The remaining passage. '.repeat(40);
-  const expected = speechSegments(text)[1];
+  const expected = speechSegments(text).slice(1).join(' ');
   const task = f.session.speak(text); await tick();
   assert.equal(p.audios.length,1);
   p.audios[0].onended(); await tick();
@@ -213,4 +216,28 @@ test('decoded audio energy reaches the HUD callback and is released after playba
   assert.equal(closed,1);
   assert.equal(disconnected,2);
   assert.equal(cancelled,1);
+});
+
+test('first audio starts from a short passage before later generation completes', async () => {
+  const later = deferred(); let requests=0;
+  const p = playerFixture({fetch:async()=>++requests===2?later.promise:response()});
+  const text = 'The requested application is now open and ready. ' + 'Here is the verified detail. '.repeat(100);
+  const task = p.player.play(text); await tick();
+  const segments = speechSegments(text);
+  assert.ok(segments[0].length<=240);
+  assert.ok(segments.length>2);
+  assert.equal(requests,2);
+  assert.equal(p.audios.length,1);
+  assert.equal(p.audios[0].playCount,1);
+  p.audios[0].onended(); await tick();
+  assert.equal(p.audios.length,1);
+  later.resolve(response()); await tick();
+  for(let index=1;index<segments.length;index++) {p.audios[index].onended();await tick();}
+  await task;
+  assert.equal(p.revoked.length,segments.length);
+});
+
+test('short conversational replies remain one natural passage', () => {
+  const text='Good evening. Spotify is open and ready for you.';
+  assert.deepEqual(speechSegments(text),[text]);
 });

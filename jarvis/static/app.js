@@ -180,6 +180,11 @@ async function stream(path, body) {
         if (event.type === 'approval') { state.approvals.push(event.approval); renderApprovals(); scrollChat(); }
         if (event.type === 'error') { toast(event.message); outcome.error = event.message; $('#chat-error').textContent = event.message; $('#chat-error').hidden = false; }
         if (event.type === 'cancelled') { outcome.text = event.message; outcome.cancelled = true; showWorking('Task cancelled'); }
+        if (event.type === 'outcome' && event.workflow) {
+          state.workflow=event.workflow;
+          if (Array.isArray(event.approvals)) { state.approvals=event.approvals; renderApprovals(); }
+          outcome.received=true; renderWorkflow();
+        }
         if (event.type === 'done') { doneEvent = true; state.active = []; }
       }
     }
@@ -187,7 +192,12 @@ async function stream(path, body) {
   } catch(error) { toast(error.message); outcome.error = error.message; $('#chat-error').textContent = error.message; $('#chat-error').hidden = false; }
   finally {
     $('#working')?.remove(); setBusy(false); const view = state.view;
-    try { if (state.conversation) await loadConversation(state.conversation, true); if (view !== 'chat') showView(view); await refresh(); }
+    try {
+      // A completed stream already contains the final answer, approvals and
+      // observed task outcome. Sidebar/history requests must not delay speech.
+      if (outcome.received) { refresh().catch(errorToast); }
+      else { if (state.conversation) await loadConversation(state.conversation, true); if (view !== 'chat') showView(view); await refresh(); }
+    }
     catch (error) { outcome.error ||= error.message; errorToast(error); }
     outcome.approvals = state.approvals.length;
     updateStopButton();
@@ -488,7 +498,7 @@ function populateVoiceChoices() {
 }
 $('#voice-select').onchange = () => { localStorage.setItem('jarvis-voice-uri', $('#voice-select').value); populateVoiceChoices(); };
 $('#voice-rate').oninput = () => { localStorage.setItem('jarvis-voice-rate', $('#voice-rate').value); $('#voice-rate-label').textContent = replyRate().toFixed(2) + '×'; };
-$('#voice-preview').onclick = async () => { try { state.settings=await patch('/settings',{speech_mode:$('#speech-mode').value,speech_voice:$('#speech-voice').value,background_voice:$('#background-voice').checked,...($('#speech-key').value.trim()?{speech_api_key:$('#speech-key').value.trim()}:{})}); $('#speech-key').value=''; populateVoiceChoices(); await voiceSession.speak('Good evening. I’m JARVIS, your personal assistant. What shall we work on together?'); } catch(error) { errorToast(error); } };
+$('#voice-preview').onclick = async () => { try { state.settings=await patch('/settings',{speech_mode:$('#speech-mode').value,speech_voice:$('#speech-voice').value,background_voice:$('#background-voice').checked,...($('#speech-key').value.trim()?{speech_api_key:$('#speech-key').value.trim()}:{})}); $('#speech-key').value=''; populateVoiceChoices(); await voiceSession.speak('Good evening. I’m JARVIS, your personal assistant. How may I assist you?'); } catch(error) { errorToast(error); } };
 $('#clear-speech-key').onclick = async () => { try { state.settings=await patch('/settings',{speech_api_key:''}); populateSettings(); toast('Saved speech key removed. An OpenAI chat or environment key may still provide natural speech.'); } catch(error) { errorToast(error); } };
 window.speechSynthesis?.addEventListener('voiceschanged', populateVoiceChoices);
 populateVoiceChoices(); voiceSession.status('off');

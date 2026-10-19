@@ -18,9 +18,12 @@ class Speech:
     MAX_AUDIO = 10 * 1024 * 1024
     VOICES = {"cedar", "marin"}
     INSTRUCTIONS = (
-        "Speak in a natural British English accent, with a warm, composed tone. "
-        "Use smooth connected phrasing, conversational pacing and clear pronunciation. "
-        "Keep pauses brief and natural, and avoid sounding theatrical or robotic."
+        "Deliver the supplied words as an original professional British personal assistant. "
+        "Use a cultivated contemporary British English accent, precise diction and a softly resonant, composed voice. "
+        "Sound quietly confident, attentive and discreet, with restrained warmth. "
+        "Keep the delivery crisp and conversational: smooth connected phrasing, a purposeful pace and short natural pauses. "
+        "Avoid exaggerated drama, breathiness, sing-song intonation and robotic pauses. "
+        "Read only the supplied words; do not add greetings, filler or commentary."
     )
 
     def __init__(self, settings):

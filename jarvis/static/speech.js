@@ -2,14 +2,15 @@
 (function (root) {
   'use strict';
 
-  function speechSegments(text, maxLength = 4000) {
+  function speechSegments(text, maxLength = 1200, firstLength = 240) {
     const parts = [];
     let remaining = String(text).replace(/\s+/g, ' ').trim();
-    while (remaining.length > maxLength) {
-      const limit = remaining.slice(0, maxLength);
+    while (remaining.length > maxLength || (!parts.length && remaining.length > firstLength + 100)) {
+      const length = parts.length ? maxLength : Math.min(firstLength, maxLength);
+      const limit = remaining.slice(0, length);
       const sentence = Math.max(limit.lastIndexOf('. '), limit.lastIndexOf('? '), limit.lastIndexOf('! '));
       const word = limit.lastIndexOf(' ');
-      const end = sentence > maxLength / 2 ? sentence + 1 : word > 0 ? word : maxLength;
+      const end = sentence > length / 2 ? sentence + 1 : word > 0 ? word : length;
       parts.push(remaining.slice(0, end).trim());
       remaining = remaining.slice(end).trim();
     }
@@ -101,19 +102,24 @@
 
     async run(operation, segments, options) {
       const rate = Number.isFinite(options.rate) ? Math.min(1.25, Math.max(0.75, options.rate)) : 1;
-      let prepared = this.prepare(operation, segments[0], rate);
+      const prepared = [];
+      const prefetch = index => {
+        if (index >= segments.length) return;
+        prepared[index] = this.prepare(operation, segments[index], rate);
+        // A later request may fail while the current audio is playing.
+        prepared[index].catch(() => {});
+      };
+      // Do not wait for a long reply's complete audio before starting. Generate
+      // the short opening and following passage together, with bounded lookahead.
+      prefetch(0); prefetch(1);
       for (let index = 0; index < segments.length; index++) {
-        const url = await prepared;
+        const url = await prepared[index];
         if (!this.current(operation) || !url) return;
-        // Generate the following passage while the current one plays.
-        prepared = index + 1 < segments.length ? this.prepare(operation, segments[index + 1], rate) : null;
-        // Attach a handler immediately: a failed prefetch must not become an
-        // unhandled rejection while the current passage is still playing.
-        if (prepared) prepared.catch(() => {});
         await this.deadline(operation, this.playAudio(operation, url, options.onEnergy || this.onEnergy), 10 * 60 * 1000);
         if (!this.current(operation)) return;
         operation.completed = index + 1;
         this.revoke(operation, url);
+        prefetch(index + 2);
       }
     }
 

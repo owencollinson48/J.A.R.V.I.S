@@ -36,6 +36,8 @@ def test_natural_voice_uses_fixed_official_endpoint_and_british_instructions(spe
         assert body["voice"] == "cedar"
         assert body["input"] == "Good evening."
         assert "British English" in body["instructions"]
+        assert "professional" in body["instructions"] and "restrained warmth" in body["instructions"]
+        assert "do not add" in body["instructions"]
         assert body["speed"] == 0.95
         assert body["response_format"] == "mp3"
         return httpx.Response(200, content=b"ID3natural-speech", headers={"content-type": "audio/mpeg"})
