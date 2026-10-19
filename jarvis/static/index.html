@@ -7,6 +7,8 @@
   <title>JARVIS · Personal intelligence</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/voice.css">
+  <script src="/static/voice.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -37,12 +39,18 @@
       </header>
 
       <main id="chat-view" class="view chat-view">
+        <section id="voice-session" class="voice-session" aria-label="Hands-free conversation" hidden>
+          <div class="session-orbit"><button type="button" class="core-center voice-orb" data-voice-toggle aria-label="End hands-free conversation" aria-pressed="false"><span>J</span></button></div>
+          <div class="voice-session-copy"><strong id="voice-session-status" role="status">Ready to listen</strong><p id="voice-transcript">Speak naturally. I’ll reply, then listen again.</p><small>Say “stop listening” to end the session.</small></div>
+          <div class="voice-session-tools"><button type="button" class="secondary-button" id="voice-skip" hidden>Skip spoken reply</button><button type="button" class="text-button" id="voice-stop">End conversation</button></div>
+        </section>
         <div class="chat-scroll" id="chat-scroll">
           <div class="welcome" id="welcome">
             <div class="eyebrow"><span class="short-line"></span> YOUR PERSONAL COMMAND CENTER</div>
             <h1>A little more clarity.<br>A lot more <span>possibility.</span></h1>
             <p class="welcome-description">Think out loud. Make a plan. Get things done.<br>I’m JARVIS, and I’m here to help you move forward.</p>
-            <div class="core-scene" aria-hidden="true"><div class="orbit orbit-outer"></div><div class="orbit orbit-middle"></div><div class="orbit orbit-inner"></div><div class="core-glow"></div><div class="core-center"><span>J</span></div><span class="orbit-marker marker-one"></span><span class="orbit-marker marker-two"></span><span class="core-coordinate coordinate-left">INTELLIGENCE<br>WITH INTENTION</span><span class="core-coordinate coordinate-right">READY WHEN<br>YOU ARE</span></div>
+            <div class="core-scene"><div class="orbit orbit-outer" aria-hidden="true"></div><div class="orbit orbit-middle" aria-hidden="true"></div><div class="orbit orbit-inner" aria-hidden="true"></div><div class="core-glow" aria-hidden="true"></div><button type="button" class="core-center voice-orb" data-voice-toggle aria-label="Start hands-free conversation" aria-pressed="false"><span>J</span></button><span class="orbit-marker marker-one" aria-hidden="true"></span><span class="orbit-marker marker-two" aria-hidden="true"></span><span class="core-coordinate coordinate-left">INTELLIGENCE<br>WITH INTENTION</span><span class="core-coordinate coordinate-right">CLICK ONCE<br>THEN JUST TALK</span></div>
+            <p class="voice-orb-hint">Click the circle once. Then just talk.</p>
             <div class="welcome-status"><span class="status-light" id="model-light"></span><span id="model-status">Checking your workspace</span></div>
             <div class="suggestion-grid">
               <button class="suggestion" data-prompt="Help me plan my day. Start by looking at my tasks and goals."><span class="suggestion-icon amber" data-icon="sun"></span><strong>Make room for what matters</strong><span>Let’s plan your day<span>↗</span></span></button>
@@ -89,6 +97,7 @@
           <div class="provider-presets"><button type="button" class="secondary-button" id="preset-openai">OpenAI</button><button type="button" class="secondary-button" id="preset-ollama">Ollama · local</button><button type="button" class="text-button" id="clear-api-key">Remove saved key</button></div>
           <label>Provider base URL<input name="provider_url" id="provider-url" type="url" required placeholder="https://api.openai.com/v1"></label><div class="form-grid"><label>Model<input name="model" id="provider-model" required placeholder="gpt-4.1-mini"></label><label>API key<input name="api_key" id="provider-key" type="password" autocomplete="off" placeholder="Enter a key to connect"></label></div><p class="field-note">Keys stay in your local settings file, accessible to your Windows account. Leave blank to keep your saved key. Ollama needs no key.</p><button type="button" id="check-provider" class="secondary-button">Test connection <span>↗</span></button><span id="provider-result" role="status"></span></section>
           <section class="settings-section"><h2><span data-icon="folder"></span> Computer access</h2><p>JARVIS can read within these folders. Add a drive such as C:\ to give it access across that drive. File edits, app launches, and commands ask for approval.</p><label>Allowed folders · one per line<textarea id="access-roots" rows="3" required spellcheck="false"></textarea></label><div id="drive-buttons" class="drive-buttons"></div><p class="field-note">Commands you approve run with your Windows account’s permissions. Folder limits apply to file tools, not programs you launch.</p></section>
+          <section class="settings-section"><h2><span data-icon="volume"></span> Voice & conversation</h2><p>Click the JARVIS circle once to enable hands-free conversation. It sends your words after a pause, speaks its reply, then listens again. Use Chrome or Edge and keep this tab open.</p><label>Reply voice<select id="voice-select" aria-describedby="voice-hint"><option value="">Automatic · British English</option></select></label><p id="voice-hint" class="field-note" role="status">Loading available voices…</p><label>Speaking speed <span id="voice-rate-label">1.0×</span><input id="voice-rate" type="range" min="0.75" max="1.25" step="0.05" value="1"></label><button type="button" class="secondary-button" id="voice-preview">Hear a sample</button><p class="field-note">Voice choices are saved automatically in this browser. No audio upload is needed. Browser speech services may process your microphone audio online. Computer actions still wait for on-screen approval.</p></section>
           <section class="settings-section"><h2><span data-icon="user"></span> Personal touches</h2><label>What should JARVIS call you?<input id="user-name" placeholder="Your name" maxlength="100"></label><label class="checkbox-label"><input type="checkbox" id="native-notifications"> Windows desktop reminders</label><button type="button" class="secondary-button" id="enable-notifications">Enable browser notifications</button><p class="field-note">Keep JARVIS running for reminders. Missed reminders appear the next time it starts.</p><div class="storage-note"><span data-icon="shield"></span><span id="storage-path"></span></div></section>
           <div class="settings-footer"><span id="settings-result" role="status"></span><button type="submit" class="primary-button">Save changes <span>↗</span></button></div>
         </form>

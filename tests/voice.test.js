@@ -1,0 +1,147 @@
+const {test} = require('node:test');
+const assert = require('node:assert/strict');
+const {VoiceSession, chooseVoice, speechChunks} = require('../jarvis/static/voice.js');
+
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function fixture(overrides = {}) {
+  const recognizers = [], spoken = [], turns = [], errors = [], phases = [];
+  let blocker = null;
+  const synthesis = {speak(utterance) { spoken.push(utterance); }, cancel() {}};
+  const makeRecognition = () => {
+    const recognition = {
+      start() { this.onstart(); }, abort() { this.onend?.(); },
+      words(text, final = true) { const result = [{transcript:text}]; result.isFinal = final; this.onresult({results:[result]}); },
+    };
+    recognizers.push(recognition);
+    return recognition;
+  };
+  const session = new VoiceSession({makeRecognition, synthesis, makeUtterance:text => ({text}),
+    onTurn:async text => { turns.push(text); return {text:'Good evening.'}; },
+    onState:state => phases.push(state.phase), onError:error => errors.push(error),
+    getBlocker:() => blocker, silenceMs:10, restartMs:5, ...overrides});
+  return {session, recognizers, spoken, turns, errors, phases, setBlocker(value) {blocker = value; session.refreshContext();}};
+}
+
+test('a voice utterance sends automatically, speaks, then listens for another turn', async t => {
+  const f = fixture(); t.after(() => f.session.stop());
+  f.session.start();
+  f.recognizers[0].words('Plan my morning');
+  await wait(30);
+  assert.deepEqual(f.turns, ['Plan my morning']);
+  assert.equal(f.session.phase, 'speaking');
+  assert.equal(f.session.recognition, null);
+  assert.equal(f.spoken[0].lang, 'en-GB');
+  f.spoken[0].onend();
+  await wait(15);
+  assert.equal(f.session.phase, 'listening');
+  assert.equal(f.recognizers.length, 2);
+  f.recognizers[1].words('Add a break');
+  await wait(30);
+  assert.deepEqual(f.turns, ['Plan my morning', 'Add a break']);
+});
+
+test('interim results, final results and late end callbacks send only one turn', async t => {
+  const f = fixture(); t.after(() => f.session.stop()); f.session.start();
+  const mic = f.recognizers[0];
+  mic.words('Remind me', false); mic.words('Remind me to stretch');
+  mic.onend(); mic.onend();
+  await wait(25);
+  assert.deepEqual(f.turns, ['Remind me to stretch']);
+});
+
+test('permission denial ends the session without repeatedly requesting the microphone', async t => {
+  const f = fixture(); t.after(() => f.session.stop()); f.session.start();
+  f.recognizers[0].onerror({error:'not-allowed'});
+  await wait(20);
+  assert.equal(f.session.enabled, false);
+  assert.equal(f.recognizers.length, 1);
+  assert.match(f.errors[0], /access was denied/);
+});
+
+test('browser no-speech events restart listening without sending empty prompts', async t => {
+  const f = fixture(); t.after(() => f.session.stop()); f.session.start();
+  f.recognizers[0].onerror({error:'no-speech'});
+  await wait(20);
+  assert.equal(f.recognizers.length, 2);
+  assert.deepEqual(f.turns, []);
+});
+
+test('computer approvals pause listening until resolved and never approve by voice', async t => {
+  const f = fixture(); t.after(() => f.session.stop()); f.session.start();
+  f.session.beginTurn(); f.setBlocker('approval');
+  const pending = f.session.finishTurn({approvals:1});
+  assert.match(f.spoken[0].text, /review the computer action/);
+  f.spoken[0].onend(); await pending; await wait(15);
+  assert.equal(f.session.phase, 'approval');
+  assert.equal(f.session.recognition, null);
+  assert.deepEqual(f.turns, []);
+  f.setBlocker(null); await wait(15);
+  assert.equal(f.session.phase, 'listening');
+});
+
+test('saying stop listening ends the session without sending a model request', async () => {
+  const f = fixture(); f.session.start();
+  await f.session.commit('JARVIS, stop listening.');
+  assert.equal(f.session.enabled, false);
+  assert.deepEqual(f.turns, []);
+});
+
+test('leaving the assistant pauses the mic and cancels reply playback', async t => {
+  const f = fixture(); t.after(() => f.session.stop()); f.session.start();
+  const audio = f.session.speak('A spoken reply.');
+  f.setBlocker('paused'); await audio;
+  assert.equal(f.session.phase, 'paused');
+  assert.equal(f.session.speaking, false);
+  assert.equal(f.session.recognition, null);
+  f.setBlocker(null); await wait(15);
+  assert.equal(f.session.phase, 'listening');
+});
+
+test('provider failure stops the voice loop rather than resending a failed request', async t => {
+  const f = fixture({onTurn:async () => ({error:'Provider connection failed'})});
+  t.after(() => f.session.stop()); f.session.start();
+  f.recognizers[0].words('Hello'); await wait(30);
+  assert.equal(f.session.enabled, false);
+  assert.deepEqual(f.errors, ['Provider connection failed']);
+});
+
+test('ending while a request runs suppresses stale speech and reopening the mic', async () => {
+  let complete;
+  const f = fixture({onTurn:() => new Promise(resolve => {complete = resolve;})});
+  f.session.start(); const request = f.session.commit('Hello');
+  f.session.stop(); complete({text:'Late reply'}); await request; await wait(15);
+  assert.equal(f.session.enabled, false);
+  assert.deepEqual(f.spoken, []);
+  assert.equal(f.recognizers.length, 1);
+});
+
+test('unavailable speech recognition produces a useful error and stays off', () => {
+  const f = fixture({makeRecognition:null});
+  assert.equal(f.session.start(), false);
+  assert.match(f.errors[0], /Chrome or Edge/);
+});
+
+test('default British voice is selected over an American default; explicit choices persist', () => {
+  const voices = [{name:'US default',lang:'en-US',voiceURI:'us'}, {name:'Microsoft George',lang:'en-GB',voiceURI:'gb'}];
+  assert.equal(chooseVoice(voices).voiceURI, 'gb');
+  assert.equal(chooseVoice(voices, 'us').voiceURI, 'us');
+  assert.equal(chooseVoice([], 'gone'), null);
+});
+
+test('long speech is split without dropping words or reading code blocks aloud', () => {
+  const text = 'Here is a sentence. '.repeat(70).trim();
+  const chunks = speechChunks(text);
+  assert.ok(chunks.every(chunk => chunk.length <= 220));
+  assert.equal(chunks.join(' '), text);
+  assert.deepEqual(speechChunks('```python\nsecret = 123\n```'), ['The code is in our chat.']);
+});
+
+test('skip reply resumes listening and ignores late speech events', async t => {
+  const f = fixture(); t.after(() => f.session.stop()); f.session.start();
+  const audio = f.session.speak('Something long.'); const utterance = f.spoken[0];
+  f.session.skipReply(); await audio;
+  utterance.onend(); await wait(15);
+  assert.equal(f.session.phase, 'listening');
+  assert.equal(f.recognizers.length, 2);
+});

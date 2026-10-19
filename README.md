@@ -36,7 +36,19 @@ Examples to try:
 - “Update the introduction of that document.”
 - “Open Calculator.”
 
-Enter sends a message; Shift+Enter adds a new line. The microphone provides dictation in supported Chrome/Edge browsers. **Voice on** reads replies aloud. This is push-to-talk, not a wake-word listener. Browser dictation may use an online speech service.
+Enter sends a typed message; Shift+Enter adds a new line. **Voice on** reads typed-chat replies aloud.
+
+## Talk to the JARVIS circle
+
+Use Chrome or Microsoft Edge. Connect a model, then click the **JARVIS circle** (or **Hands-free**) once and allow microphone access. This initial click is needed for browser microphone/audio permissions; after that, speak naturally. A short pause sends your words automatically, JARVIS speaks the reply, and listening resumes without another button press. The circle stays visible with Listening, Thinking, and Speaking states. Say **“stop listening”** to end the session, or use **End conversation**. The microphone is paused while replies play to avoid hearing its own voice. **Skip spoken reply** moves back to listening sooner.
+
+Voice pauses while you use another app page, an item dialog, or a background browser tab. It resumes when you return to the Assistant. Computer actions still wait for on-screen approval. Permission, model, and speech-service errors stop the voice loop with an explanation. This is a hands-free browser session, not a background wake-word service; keep the dashboard open, and start a new voice session after reloading it. Browser recognition may use an online speech service and requires working microphone permissions.
+
+### British accent
+
+Open **Settings & connections → Voice & conversation**. JARVIS automatically prefers an available **English (United Kingdom)** voice. Choose another voice from the list, adjust the speaking speed, and click **Hear a sample**. Voice preferences save automatically in that browser. No voice recording, upload, or extra API key is required.
+
+Available voices depend on Windows and your browser. If no British voice appears, add an English (United Kingdom) speech voice under **Windows Settings → Time & language → Speech**, then restart the browser. The app explains when it must fall back to the browser voice. This uses stock speech voices; it does not clone a person's voice.
 
 ## Computer access
 
@@ -78,6 +90,8 @@ python -m venv .venv
 ```
 
 Optional: `python run.py --port 8766` chooses another local port. The frontend is plain HTML/CSS/JavaScript with no build step or external CDN dependencies.
+
+With Node.js 18+ installed, run `node --test tests/voice.test.js` for speech turn-taking, duplicate-result handling, approval pauses, British voice selection, and error recovery tests. These use simulated speech APIs; a real microphone, installed Windows voices, and browser speech-service access still need a check on the target PC.
 
 For this cloud development workspace, run `bash scripts/setup-cloud.sh`, then `JARVIS_DATA_DIR="$PWD/.jarvis-data" .venv/bin/python run.py --no-browser`. Run `.venv/bin/python scripts/check-ready.py` from another terminal to check the dashboard and authenticated planner API. Cloud validation exercises the app on Linux; native Windows app launches, microphone permissions, and Windows notifications still need testing on your PC.
 

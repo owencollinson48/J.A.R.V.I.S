@@ -28,6 +28,7 @@ function hydrateIcons(root = document) { $$('[data-icon]', root).forEach(el => {
 hydrateIcons();
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const state = {view:'chat', conversation:null, conversations:[], tasks:[], goals:[], reminders:[], memories:[], settings:null, busy:false, planner:'tasks', approvals:[], currentPath:'', previewPath:'', editing:null, speaking:localStorage.getItem('jarvis-speak') === 'true', notified:new Set(), refreshing:false};
+let voiceSession = null;
 let toastTimer;
 function toast(text) { $('#toast').textContent = text; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 4200); }
 async function api(path, options = {}) {
@@ -67,6 +68,7 @@ function showView(view) {
   if (view === 'planner') renderPlanner();
   if (view === 'memory') renderMemories();
   if (view === 'settings') populateSettings();
+  voiceSession?.refreshContext();
 }
 $$('[data-view]').forEach(el => el.addEventListener('click', () => showView(el.dataset.view)));
 $$('[data-open-view]').forEach(el => el.addEventListener('click', () => showView(el.dataset.openView)));
@@ -86,6 +88,7 @@ function renderConversations() {
 }
 function newChat() {
   if (state.busy) { toast('Let this conversation finish first.'); return; }
+  voiceSession?.stop();
   state.conversation = null; state.approvals = []; localStorage.removeItem('jarvis-conversation');
   $('#messages').innerHTML = ''; $('#approval-list').innerHTML = ''; $('#welcome').hidden = false; $('#chat-error').hidden = true;
   renderConversations(); showView('chat'); $('#chat-input').focus();
@@ -107,9 +110,10 @@ function appendMessage(role, content = '', streaming = false) {
 function scrollChat() { const el = $('#chat-scroll'); el.scrollTop = el.scrollHeight; }
 async function loadConversation(id, force = false) {
   if (state.busy && !force) { toast('Let this conversation finish first.'); return; }
+  if (state.conversation !== id) voiceSession?.stop();
   const history = await api('/conversations/' + id);
   state.conversation = id; localStorage.setItem('jarvis-conversation', id); state.approvals = history.approvals;
-  $('#messages').innerHTML = ''; $('#welcome').hidden = history.messages.some(m => ['user','assistant'].includes(m.role) && m.content);
+  $('#messages').innerHTML = ''; $('#welcome').hidden = voiceSession?.enabled || history.messages.some(m => ['user','assistant'].includes(m.role) && m.content);
   history.messages.filter(m => ['user','assistant'].includes(m.role) && m.content).forEach(m => appendMessage(m.role, m.content));
   renderApprovals(); renderConversations(); showView('chat'); scrollChat();
   if (history.active && !state.busy) { showWorking('Finishing your last request'); scheduleRecovery(id); }
@@ -122,7 +126,7 @@ function scheduleRecovery(id) {
     try { const data = await api('/conversations/' + id); if (data.active) scheduleRecovery(id); else await loadConversation(id); } catch(e) { errorToast(e); }
   }, 1800);
 }
-function setBusy(value) { state.busy = value; $('#send-button').disabled = value; $('#chat-input').disabled = value; $('#new-chat').disabled = value; $$('[data-approval]').forEach(el => el.disabled = value); }
+function setBusy(value) { state.busy = value; $('#send-button').disabled = value; $('#chat-input').disabled = value; $('#new-chat').disabled = value; $$('[data-approval]').forEach(el => el.disabled = value); voiceSession?.refreshContext(); }
 function showWorking(text) {
   let el = $('#working');
   if (!el) { el = document.createElement('div'); el.id = 'working'; el.className = 'working'; $('#messages').append(el); }
@@ -130,7 +134,8 @@ function showWorking(text) {
 }
 async function stream(path, body) {
   setBusy(true); $('#chat-error').hidden = true;
-  let current = null, partial = '', spoken = '';
+  let current = null, partial = '';
+  const outcome = {text:'', error:'', approvals:0};
   try {
     const response = await fetch('/api' + path, {method:'POST', headers:{'Content-Type':'application/json', 'X-Jarvis-Client':'dashboard'}, body:JSON.stringify(body)});
     if (!response.ok) { const data = await response.json(); throw new Error(data.detail || 'Unable to send request'); }
@@ -145,31 +150,46 @@ async function stream(path, body) {
         if (!block.startsWith('data: ')) continue;
         const event = JSON.parse(block.slice(6));
         if (event.type === 'token') { $('#working')?.remove(); if (!current) current = appendMessage('assistant', '', true); partial += event.text; $('.message-text', current).textContent = partial; scrollChat(); }
-        if (event.type === 'message') { if (current) { current.classList.remove('streaming'); $('.message-text', current).innerHTML = formattedText(event.content); } else if (event.content) appendMessage('assistant', event.content); spoken = event.content; current = null; partial = ''; }
+        if (event.type === 'message') { if (current) { current.classList.remove('streaming'); $('.message-text', current).innerHTML = formattedText(event.content); } else if (event.content) appendMessage('assistant', event.content); outcome.text = event.content; current = null; partial = ''; }
         if (event.type === 'status') { showWorking(event.text); scrollChat(); }
         if (event.type === 'tool') { showWorking(event.ok ? `${event.name.replaceAll('_',' ')} · done` : `${event.name.replaceAll('_',' ')} · not completed`); }
         if (event.type === 'approval') { state.approvals.push(event.approval); renderApprovals(); scrollChat(); }
-        if (event.type === 'error') { $('#chat-error').textContent = event.message; $('#chat-error').hidden = false; }
+        if (event.type === 'error') { outcome.error = event.message; $('#chat-error').textContent = event.message; $('#chat-error').hidden = false; }
         if (event.type === 'done') doneEvent = true;
       }
     }
     if (!doneEvent) throw new Error('Connection interrupted. Refresh this conversation to see the saved result.');
-    if (state.speaking && spoken) speak(spoken);
-  } catch(error) { $('#chat-error').textContent = error.message; $('#chat-error').hidden = false; }
-  finally { $('#working')?.remove(); setBusy(false); const view = state.view; if (state.conversation) await loadConversation(state.conversation, true).catch(errorToast); if (view !== 'chat') showView(view); await refresh(); if (state.view === 'chat') $('#chat-input').focus(); }
+  } catch(error) { outcome.error = error.message; $('#chat-error').textContent = error.message; $('#chat-error').hidden = false; }
+  finally {
+    $('#working')?.remove(); setBusy(false); const view = state.view;
+    try { if (state.conversation) await loadConversation(state.conversation, true); if (view !== 'chat') showView(view); await refresh(); }
+    catch (error) { outcome.error ||= error.message; errorToast(error); }
+    outcome.approvals = state.approvals.length;
+    if (state.view === 'chat' && !voiceSession?.enabled) $('#chat-input').focus();
+  }
+  return outcome;
 }
-async function sendMessage(text) {
+async function deliverReply(result, wasHandsfree) {
+  const handledBySession = voiceSession.enabled;
+  await voiceSession.finishTurn(result);
+  if (!handledBySession && !wasHandsfree && !voiceSession.enabled && state.speaking && result.text && !result.error) await voiceSession.speak(result.text);
+}
+async function sendMessage(text, {manageVoice = true} = {}) {
   const content = (text ?? $('#chat-input').value).trim();
-  if (!content || state.busy) return;
-  if (!state.settings?.provider_ready) { showView('settings'); toast('Connect an API provider or local model to start chatting.'); return; }
-  if (state.approvals.length) { toast('Approve or decline your pending actions first.'); showView('chat'); scrollChat(); return; }
+  if (!content || state.busy) return {error:'Wait for the current request to finish.'};
+  if (!state.settings?.provider_ready) { showView('settings'); toast('Connect an API provider or local model to start chatting.'); return {error:'Connect a model in Settings before starting voice.'}; }
+  if (state.approvals.length) { toast('Approve or decline your pending actions first.'); showView('chat'); scrollChat(); return {error:'Review the pending computer actions first.'}; }
+  const wasHandsfree = voiceSession?.enabled;
+  voiceSession?.beginTurn();
   setBusy(true);
   try {
     if (!state.conversation) { const c = await post('/conversations'); state.conversation = c.id; localStorage.setItem('jarvis-conversation', c.id); }
     $('#chat-input').value = ''; $('#chat-input').style.height = 'auto'; $('#welcome').hidden = true;
     showView('chat'); appendMessage('user', content); showWorking('Thinking'); scrollChat();
-    await stream('/conversations/' + state.conversation + '/chat', {content});
-  } catch(e) { errorToast(e); setBusy(false); }
+    const result = await stream('/conversations/' + state.conversation + '/chat', {content});
+    if (manageVoice) await deliverReply(result, wasHandsfree);
+    return result;
+  } catch(e) { errorToast(e); setBusy(false); const result = {error:e.message}; if (manageVoice) await deliverReply(result, wasHandsfree); return result; }
 }
 $('#send-button').onclick = () => sendMessage();
 $('#chat-input').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); sendMessage(); } });
@@ -177,7 +197,8 @@ $('#chat-input').addEventListener('input', event => { event.target.style.height 
 $$('[data-prompt]').forEach(el => el.onclick = () => { $('#chat-input').value = el.dataset.prompt; sendMessage(); });
 function renderApprovals() {
   $('#approval-list').innerHTML = state.approvals.map(a => `<section class="approval-card"><h3>${icon('shield')} Your approval is needed</h3><p>${escapeHTML(a.preview.summary)}</p><pre>${escapeHTML(JSON.stringify(a.arguments, null, 2))}</pre>${a.preview.docx_note ? `<p>${escapeHTML(a.preview.docx_note)}</p>` : ''}<p>This action will run on your computer. Existing documents are backed up before replacement.</p><div class="approval-actions"><button class="secondary-button" data-approval="${a.id}" data-decision="false">Decline</button><button class="primary-button" data-approval="${a.id}" data-decision="true">Approve action <span>↗</span></button></div></section>`).join('');
-  $$('[data-approval]').forEach(el => { el.disabled = state.busy; el.onclick = async () => { if (state.busy) return; await stream('/approvals/' + el.dataset.approval, {approved:el.dataset.decision === 'true'}); }; });
+  $$('[data-approval]').forEach(el => { el.disabled = state.busy; el.onclick = async () => { if (state.busy) return; const wasHandsfree = voiceSession.enabled; voiceSession.beginTurn(); const result = await stream('/approvals/' + el.dataset.approval, {approved:el.dataset.decision === 'true'}); await deliverReply(result, wasHandsfree); }; });
+  voiceSession?.refreshContext();
 }
 
 async function refresh() {
@@ -227,6 +248,7 @@ function openItem(kind, item = null) {
   $('#item-goal').innerHTML = '<option value="">No goal</option>' + state.goals.map(g => `<option value="${g.id}">${escapeHTML(g.title)}</option>`).join(''); $('#item-goal').value = item?.goal_id || '';
   if (item?.due_at) { const d = new Date(item.due_at); $('#item-due').value = new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,16); }
   $('#dialog-error').hidden = true; updateDialog(); $('#item-dialog').showModal();
+  voiceSession?.refreshContext();
 }
 function updateDialog() {
   const kind = $('#item-kind').value;
@@ -330,23 +352,80 @@ function notifyDue() {
     if ('Notification' in window && Notification.permission === 'granted') new Notification('JARVIS reminder', {body:reminder.title, tag:reminder.id, icon:'/static/favicon.svg'});
   }
 }
-function speak(text) { if (!('speechSynthesis' in window)) return; speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(text.replace(/[`*#]/g,'')); utterance.rate = 1; speechSynthesis.speak(utterance); }
-function renderVoice() { $('#speak-toggle').classList.toggle('enabled',state.speaking); $('#speak-toggle').setAttribute('aria-pressed',String(state.speaking)); $('#speak-toggle span:last-child').textContent = state.speaking ? 'Voice on' : 'Voice off'; }
-$('#speak-toggle').onclick = () => { if (!('speechSynthesis' in window)) { toast('Speech playback is unavailable in this browser.'); return; } state.speaking = !state.speaking; localStorage.setItem('jarvis-speak',state.speaking); if (!state.speaking) speechSynthesis.cancel(); renderVoice(); };
-renderVoice();
+$('.composer-tools').insertAdjacentHTML('beforeend', `<button type="button" class="voice-mode" id="handsfree-toggle" aria-pressed="false">${icon('mic')}<span>Hands-free</span></button>`);
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-if (SpeechRecognition) {
-  const recognition = new SpeechRecognition(); recognition.continuous = false; recognition.interimResults = true;
-  let listening = false, dictationBase = '';
-  $('#mic-button').onclick = () => {
-    if (listening) { recognition.stop(); return; }
-    dictationBase = $('#chat-input').value;
-    try { recognition.start(); listening = true; $('#mic-button').classList.add('mic-active'); toast('Listening. Your browser may use its online speech service.'); } catch(e) { errorToast(e); }
-  };
-  recognition.onresult = event => { const text = [...event.results].map(r => r[0].transcript).join(' '); $('#chat-input').value = dictationBase + (dictationBase ? ' ' : '') + text; };
-  recognition.onend = () => { listening = false; $('#mic-button').classList.remove('mic-active'); $('#chat-input').focus(); };
-  recognition.onerror = event => toast('Dictation: ' + event.error + '. You can keep typing.');
-} else { $('#mic-button').onclick = () => toast('Use Chrome or Edge on Windows for microphone dictation.'); }
+const replyVoice = () => JarvisVoice.chooseVoice(window.speechSynthesis?.getVoices() || [], localStorage.getItem('jarvis-voice-uri') || '');
+const replyRate = () => Math.min(1.25, Math.max(0.75, Number(localStorage.getItem('jarvis-voice-rate')) || 1));
+function renderVoice() {
+  const on = state.speaking || voiceSession?.enabled;
+  $('#speak-toggle').classList.toggle('enabled', on); $('#speak-toggle').setAttribute('aria-pressed', String(on)); $('#speak-toggle span:last-child').textContent = on ? 'Voice on' : 'Voice off';
+  $('#handsfree-toggle').classList.toggle('enabled', !!voiceSession?.enabled); $('#handsfree-toggle').setAttribute('aria-pressed', String(!!voiceSession?.enabled));
+}
+voiceSession = new JarvisVoice.VoiceSession({
+  makeRecognition: SpeechRecognition ? () => new SpeechRecognition() : null,
+  synthesis: window.speechSynthesis,
+  makeUtterance: window.SpeechSynthesisUtterance ? text => new SpeechSynthesisUtterance(text) : null,
+  getVoice: replyVoice,
+  getRate: replyRate,
+  getBlocker: () => document.hidden || state.view !== 'chat' || $('#item-dialog').open ? 'paused' : state.busy ? 'thinking' : state.approvals.length ? 'approval' : null,
+  onTurn: text => sendMessage(text, {manageVoice:false}),
+  onTranscript: text => { $('#voice-transcript').textContent = text || 'Speak naturally. I’ll reply, then listen again.'; },
+  onError: toast,
+  onState: ({enabled, phase}) => {
+    document.body.dataset.voicePhase = phase;
+    $('#voice-session').hidden = !enabled;
+    $('#voice-skip').hidden = phase !== 'speaking';
+    $('#voice-session-status').textContent = {starting:'Opening microphone…', listening:'I’m listening', thinking:'Thinking…', speaking:'Speaking', approval:'Waiting for your approval', paused:'Voice paused', off:'Voice off'}[phase] || phase;
+    if (phase === 'listening') $('#voice-transcript').textContent = 'Go ahead. I’m listening.';
+    if (phase === 'approval') $('#voice-transcript').textContent = 'Review the action in chat. Listening resumes after it is resolved.';
+    if (phase === 'paused') $('#voice-transcript').textContent = 'Return to the Assistant tab to continue.';
+    $('#welcome').hidden = enabled || !!$('#messages .message');
+    $$('[data-voice-toggle]').forEach(el => { el.setAttribute('aria-pressed', String(enabled)); el.setAttribute('aria-label', enabled ? 'End hands-free conversation' : 'Start hands-free conversation'); });
+    $('#mic-button').classList.toggle('mic-active', phase === 'listening');
+    $('#mic-button').setAttribute('aria-label', enabled ? 'End hands-free conversation' : 'Start hands-free conversation');
+    $('#mic-button').title = enabled ? 'End hands-free conversation' : 'Start hands-free conversation';
+    renderVoice();
+  },
+});
+function toggleHandsfree() {
+  if (voiceSession.enabled) { voiceSession.stop(); return; }
+  if (!state.settings?.provider_ready) { showView('settings'); toast('Connect a model first, then click the JARVIS circle.'); return; }
+  if ($('#chat-input').value.trim()) { toast('Send or clear your draft before starting hands-free mode.'); return; }
+  if (state.approvals.length) { toast('Review the pending actions before starting hands-free mode.'); return; }
+  showView('chat');
+  if (voiceSession.start()) toast('Hands-free mode on. Speak, then pause to send. Say “stop listening” to finish.');
+}
+$$('[data-voice-toggle]').forEach(el => el.onclick = toggleHandsfree);
+$('#handsfree-toggle').onclick = $('#mic-button').onclick = toggleHandsfree;
+$('#voice-stop').onclick = () => voiceSession.stop();
+$('#voice-skip').onclick = () => voiceSession.skipReply();
+$('#speak-toggle').onclick = () => {
+  if (!window.speechSynthesis) { toast('Speech playback is unavailable in this browser.'); return; }
+  if (voiceSession.enabled) { voiceSession.stop(); state.speaking = false; }
+  else { state.speaking = !state.speaking; if (!state.speaking) voiceSession.cancelSpeech(); }
+  localStorage.setItem('jarvis-speak', state.speaking); renderVoice();
+};
+$('#chat-input').addEventListener('input', () => { if (voiceSession.enabled) voiceSession.stop(); });
+$('#item-dialog').addEventListener('close', () => voiceSession.refreshContext());
+document.addEventListener('visibilitychange', () => voiceSession.refreshContext());
+window.addEventListener('pagehide', () => voiceSession.stop());
+function populateVoiceChoices() {
+  const voices = window.speechSynthesis?.getVoices() || [];
+  const british = voices.filter(v => /^en[-_]GB$/i.test(v.lang));
+  const other = voices.filter(v => !british.includes(v)).sort((a,b) => a.name.localeCompare(b.name));
+  const options = list => list.map(v => `<option value="${escapeHTML(v.voiceURI || v.name)}">${escapeHTML(v.name)} · ${escapeHTML(v.lang)}</option>`).join('');
+  $('#voice-select').innerHTML = '<option value="">Automatic · British English</option>' + (british.length ? `<optgroup label="British English">${options(british)}</optgroup>` : '') + (other.length ? `<optgroup label="Other available voices">${options(other)}</optgroup>` : '');
+  const saved = localStorage.getItem('jarvis-voice-uri') || '';
+  $('#voice-select').value = voices.some(v => (v.voiceURI || v.name) === saved) ? saved : '';
+  const chosen = replyVoice();
+  $('#voice-hint').textContent = chosen ? `Reply voice: ${chosen.name} (${chosen.lang}).` : 'No British voice is available yet. Add an English (United Kingdom) speech voice in Windows Settings → Time & language → Speech, then restart your browser. The browser default may be used until then.';
+  $('#voice-rate').value = replyRate(); $('#voice-rate-label').textContent = replyRate().toFixed(2) + '×';
+}
+$('#voice-select').onchange = () => { localStorage.setItem('jarvis-voice-uri', $('#voice-select').value); populateVoiceChoices(); };
+$('#voice-rate').oninput = () => { localStorage.setItem('jarvis-voice-rate', $('#voice-rate').value); $('#voice-rate-label').textContent = replyRate().toFixed(2) + '×'; };
+$('#voice-preview').onclick = () => voiceSession.speak('Good evening. I’m JARVIS, your personal assistant. What shall we work on together?').catch(errorToast);
+window.speechSynthesis?.addEventListener('voiceschanged', populateVoiceChoices);
+populateVoiceChoices(); voiceSession.status('off');
 function errorToast(error) { toast(error.message || String(error)); }
 async function init() {
   try {
