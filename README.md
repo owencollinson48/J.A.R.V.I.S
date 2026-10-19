@@ -24,6 +24,8 @@ This is a source-code distribution, not a signed Windows installer. If Smart App
 
 `start.py` creates the environment, installs dependencies with pip's normal verification enabled, and opens the dashboard. It reuses dependencies on later starts without requiring another download. This path does not change Windows security settings. It requires a Python installation Windows permits to run; install Python from python.org if necessary.
 
+If the server fails after setup, `start.py` saves its full output in `.jarvis-data\startup.log` in the extracted app folder and repeats the last lines before closing. A busy port gets a specific explanation. For an older launcher that only says “JARVIS could not start”, open Command Prompt in that same folder and run `.venv\Scripts\python.exe run.py --no-browser`, then copy the traceback or ERROR lines it prints. This exposes the underlying error without reinstalling dependencies or changing saved data.
+
 If Smart App Control blocks **`python.exe`**, a **`.dll`**, or a **`.pyd`** dependency, the source launcher may also fail. Record the exact blocked filename if available so that component can be identified; a batch-file change cannot resolve a blocked binary.
 
 Examples to try:

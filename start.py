@@ -4,6 +4,7 @@ import hashlib
 import os
 import subprocess
 import sys
+from collections import deque
 from pathlib import Path
 
 
@@ -61,6 +62,52 @@ def prepare(root):
     return python
 
 
+def run_application(python, root, port=8765, no_browser=False):
+    logs = root / ".jarvis-data"
+    logs.mkdir(exist_ok=True)
+    log_path = logs / "startup.log"
+    command = [str(python), "-u", str(root / "run.py"), "--port", str(port)]
+    if no_browser:
+        command.append("--no-browser")
+    print("Startup log: " + str(log_path), flush=True)
+    tail = deque(maxlen=25)
+    environment = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    with log_path.open("w", encoding="utf-8") as log:
+        with subprocess.Popen(command, cwd=root, env=environment, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                              errors="replace") as process:
+            try:
+                for line in process.stdout:
+                    log.write(line)
+                    log.flush()
+                    tail.append(line)
+                    try:
+                        print(line, end="", flush=True)
+                    except UnicodeEncodeError:
+                        # Older Windows consoles may not display every diagnostic character.
+                        safe = line.encode(sys.stdout.encoding or "ascii", errors="backslashreplace").decode(sys.stdout.encoding or "ascii")
+                        print(safe, end="", flush=True)
+                code = process.wait()
+            except KeyboardInterrupt:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                raise
+    if code:
+        recent = "".join(tail)
+        if "10048" in recent or "address already in use" in recent.lower():
+            detail = (f"Port {port} is already in use. Close the other JARVIS server window, "
+                      f"or run: py -3 start.py --port {port + 1}")
+        else:
+            detail = "The last server output was:\n" + (recent.strip() or "No server output was produced.")
+        raise RuntimeError(f"JARVIS exited with code {code}. {detail}\nFull startup log: {log_path}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Install and start JARVIS with Python")
     parser.add_argument("--setup-only", action="store_true")
@@ -74,13 +121,7 @@ def main():
             print("JARVIS setup completed.")
             return 0
         print("Starting JARVIS. Keep this window open for reminders. Ctrl+C stops it.", flush=True)
-        command = [str(python), str(root / "run.py"), "--port", str(args.port)]
-        if args.no_browser:
-            command.append("--no-browser")
-        result = subprocess.run(command, cwd=root)
-        if result.returncode:
-            raise RuntimeError("JARVIS could not start. Copy the error above for troubleshooting.")
-        return 0
+        return run_application(python, root, args.port, args.no_browser)
     except KeyboardInterrupt:
         print("\nJARVIS stopped.")
         return 0
