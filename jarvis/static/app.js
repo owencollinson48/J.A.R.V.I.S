@@ -29,7 +29,7 @@ hydrateIcons();
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const state = {view:'chat', conversation:null, conversations:[], tasks:[], goals:[], reminders:[], memories:[], settings:null, busy:false, planner:'tasks', approvals:[], currentPath:'', previewPath:'', editing:null, speaking:localStorage.getItem('jarvis-speak') === 'true', notified:new Set(), refreshing:false};
 let voiceSession = null;
-Object.assign(state, {active:[], workflow:null, flowActions:[], applications:[], appRequest:0});
+Object.assign(state, {active:[], workflow:null, flowActions:[], applications:[], appRequest:0, visual:null});
 let toastTimer;
 function toast(text) { $('#toast').textContent = text; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 4200); }
 async function api(path, options = {}) {
@@ -40,6 +40,21 @@ async function api(path, options = {}) {
 const post = (path, data = {}) => api(path, {method:'POST', body:JSON.stringify(data)});
 const patch = (path, data) => api(path, {method:'PATCH', body:JSON.stringify(data)});
 const remove = path => api(path, {method:'DELETE'});
+function showVisual(visual) {
+  state.visual = visual || null;
+  if (visual) JarvisVisual.show(visual); else JarvisVisual.clear();
+}
+document.addEventListener('jarvis:visual-dismiss', async event => {
+  const conversation = state.conversation;
+  const visual = state.visual;
+  if (!conversation || !visual || event.detail?.id !== visual.id) return;
+  state.visual = null;
+  try { await remove('/conversations/' + conversation + '/visuals/' + visual.id); }
+  catch(error) {
+    if (state.conversation === conversation && !state.visual) showVisual(visual);
+    errorToast(error);
+  }
+});
 const formatDate = value => value ? new Date(value).toLocaleString(undefined, {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}) : 'Whenever you’re ready';
 function relativeDue(value) {
   if (!value) return 'No due date';
@@ -109,6 +124,7 @@ function newChat() {
   if (state.busy) { toast('Let this conversation finish first.'); return; }
   voiceSession?.stop();
   state.conversation = null; state.approvals = []; localStorage.removeItem('jarvis-conversation');
+  showVisual(null);
   state.workflow = null; state.flowActions = []; renderWorkflow();
   $('#messages').innerHTML = ''; $('#approval-list').innerHTML = ''; $('#welcome').hidden = false; $('#chat-error').hidden = true;
   renderConversations(); showView('chat'); setConversationOpen(false);
@@ -133,6 +149,7 @@ async function loadConversation(id, force = false) {
   if (state.conversation !== id) voiceSession?.stop();
   const history = await api('/conversations/' + id);
   state.conversation = id; localStorage.setItem('jarvis-conversation', id); state.approvals = history.approvals;
+  showVisual(history.visual);
   state.workflow = history.workflow || null; state.flowActions = history.actions || []; renderWorkflow();
   $('#messages').innerHTML = ''; $('#welcome').hidden = voiceSession?.enabled || history.messages.some(m => ['user','assistant'].includes(m.role) && m.content);
   history.messages.filter(m => ['user','assistant'].includes(m.role) && m.content).forEach(m => appendMessage(m.role, m.content));
@@ -175,6 +192,7 @@ async function stream(path, body) {
         if (event.type === 'status') { showWorking(event.text); scrollChat(); }
         if (event.type === 'workflow') { if(state.workflow?.id !== event.id) state.flowActions = []; state.workflow = {id:event.id,status:event.status,request:body.content || 'Continuing your task',plan:[]}; state.active = [state.conversation]; renderWorkflow(); updateStopButton(); }
         if (event.type === 'plan') { state.workflow = {...state.workflow,detail:event.outcome,plan:event.steps}; renderWorkflow(); $('#workflow-card').open = true; }
+        if (event.type === 'visual') { showVisual(event.visual); }
         if (event.type === 'action') { const update=event.action; const index=state.flowActions.findIndex(action=>action.id===update.id); if(index<0) state.flowActions.push(update); else state.flowActions[index]={...state.flowActions[index],...update}; renderWorkflow(); }
         if (event.type === 'tool') { const action=state.flowActions.find(action=>action.id===event.action_id); if(action) action.status=event.status || (event.ok?'completed':'failed'); renderWorkflow(); showWorking(event.ok ? `${event.name.replaceAll('_',' ')} · done` : `${event.name.replaceAll('_',' ')} · not completed`); }
         if (event.type === 'approval') { state.approvals.push(event.approval); renderApprovals(); scrollChat(); }

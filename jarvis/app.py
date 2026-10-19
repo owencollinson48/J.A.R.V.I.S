@@ -202,8 +202,14 @@ def create_app(data_dir=None, provider_factory=Provider):
         existing(conversation_id)
         workflow = store.row('SELECT * FROM workflows WHERE conversation_id=? ORDER BY created_at DESC LIMIT 1',(conversation_id,))
         return {"messages": store.history(conversation_id), "approvals": store.pending(conversation_id),
+                "visual":services.visuals.latest(conversation_id),
                 "active": conversation_id in assistant.active,
                 'workflow':workflow, 'actions':store.rows('SELECT id,workflow_id,name,status,risk,created_at FROM action_log WHERE workflow_id=? ORDER BY created_at',(workflow['id'],)) if workflow else []}
+
+    @app.delete('/api/conversations/{conversation_id}/visuals/{visual_id}')
+    async def dismiss_visual(conversation_id: str, visual_id: str):
+        existing(conversation_id)
+        return services.visuals.dismiss(conversation_id,visual_id)
 
     @app.post('/api/cancel')
     async def cancel_all():
