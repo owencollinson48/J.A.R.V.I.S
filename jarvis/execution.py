@@ -35,6 +35,7 @@ class RunContext:
         self.store, self.conversation_id, self.request = store, conversation_id, request
         self.id = workflow_id or identifier()
         self.event = threading.Event()
+        self.finished = False
         self.deadline = time.monotonic() + seconds
         self.actions = store.row('SELECT count(*) AS n FROM action_log WHERE workflow_id=?',(self.id,))['n'] if workflow_id else 0
         if workflow_id:
@@ -44,6 +45,7 @@ class RunContext:
                           (self.id, conversation_id, request, 'running', '[]', '', now(), now()))
 
     def check(self):
+        if self.finished: raise Cancelled('Task has already ended')
         if self.event.is_set(): raise Cancelled('Task cancelled by the user')
         if time.monotonic() > self.deadline:
             self.event.set()
@@ -51,6 +53,7 @@ class RunContext:
 
     def finish(self, status, detail=''):
         self.store.execute('UPDATE workflows SET status=?,detail=?,updated_at=? WHERE id=?', (status, detail[:1000], now(), self.id))
+        self.finished = True
 
     def plan(self, outcome, steps):
         self.check()
@@ -96,8 +99,17 @@ class PermissionPolicy:
         return False
 
     def decide(self, name, args, metadata=None, context=None):
+        if not isinstance(context, RunContext):
+            raise ValueError('Computer actions require an active user request')
+        context.check()
+        decision = self._review_decision(name, args, metadata, context)
+        if self.settings.values.get('permissions_mode') == 'autonomous':
+            return dataclasses.replace(decision, confirm=False,
+                reason='The active user request authorizes this action; autonomous mode is enabled')
+        return decision
+
+    def _review_decision(self, name, args, metadata, context):
         metadata = metadata or {}
-        if not context: return Decision(True, 'No active user request authorizes this computer action', 'review')
         paths = [str(args[k]) for k in ('path','source','destination','directory') if args.get(k)]
         paths.extend(metadata.get('resolved_paths',[]))
         if metadata.get('change'): paths.extend(str(metadata['change'].get(key,'')) for key in ('written','moved','destination'))
@@ -124,7 +136,7 @@ class PermissionPolicy:
             target = str(metadata.get('target_name', ''))
             if metadata.get('password') or metadata.get('interpreter'):
                 return Decision(True, 'This interacts with a password field, terminal, or command interpreter', 'credentials' if metadata.get('password') else 'command')
-            if action in {'click','press_keys','fill','set_text'} and CONSEQUENCE.search(target):
+            if action in {'click','double_click','right_click','press_keys','fill','set_text'} and CONSEQUENCE.search(target):
                 return Decision(True, 'This control may send information, make a purchase, delete data, or change security settings', 'consequential_ui')
             if re.match(r'\s*(?:javascript|data|file):', args.get('text',''), re.I):
                 return Decision(True, 'This text can activate local content or executable browser code', 'execution')

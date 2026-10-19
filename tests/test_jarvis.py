@@ -54,7 +54,7 @@ def client(tmp_path):
     app = create_app(tmp_path / "data", provider_factory=ScriptedProvider)
     root = tmp_path / "documents"
     root.mkdir()
-    app.state.settings.update({"roots":[str(root)], "native_notifications":False, 'permissions_mode':'review'})
+    app.state.settings.update({"roots":[str(root)], "native_notifications":False, 'permissions_mode':'review', 'computer_access':'folders'})
     with TestClient(app, base_url='http://127.0.0.1') as c:
         c.get("/")
         c.headers.update(HEADERS)

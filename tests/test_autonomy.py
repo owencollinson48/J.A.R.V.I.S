@@ -65,7 +65,7 @@ def parsed(response):
 def env(tmp_path):
     app = create_app(tmp_path / 'private',provider_factory=QueueProvider)
     root = tmp_path / 'documents'; root.mkdir()
-    app.state.settings.update({'roots':[str(root)],'native_notifications':False})
+    app.state.settings.update({'roots':[str(root)],'native_notifications':False,'permissions_mode':'routine'})
     adapter = FakeWindows(); app.state.tools.applications.adapter = adapter
     with TestClient(app,base_url='http://127.0.0.1') as client:
         client.get('/'); client.headers['X-Jarvis-Client']='dashboard'

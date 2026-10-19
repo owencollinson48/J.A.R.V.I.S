@@ -84,7 +84,7 @@
   }
   function draw(root){
     root.replaceChildren();root.classList.toggle('flow-empty',!workflow);
-    if(!workflow){const message=document.createElement('p');message.textContent='Your next request starts here. Connected actions appear as JARVIS works.';root.append(message);return;}
+    if(!workflow){const message=document.createElement('p');message.textContent='Ready for your next request.';root.append(message);return;}
     const lines=svgNode('svg',{'aria-hidden':'true',class:'flow-lines'});root.append(lines);
     const nodes=document.createElement('div');nodes.className='flow-nodes';root.append(nodes);
     const request=box(nodes,'YOUR REQUEST',workflow.request||'Current task','received','','flow-root');
@@ -103,6 +103,7 @@
   const drawAll=()=>document.querySelectorAll('[data-flow-graph]').forEach(draw);
   const resize=new ResizeObserver(()=>drawAll());resize.observe(rail);const full=document.querySelector('#activity-flow');if(full)resize.observe(full);
   window.JarvisHUD={
+    showTaskFlow(){tabs.children[0].click();},
     setVoice(state){phase=state.phase;updateLabels();if(phase==='listening'&&!document.hidden)startMeter();else stopMeter();},
     pulse(){pulse=.5+Math.random()*.4;},
     setBusy(value){running=value;updateLabels();},

@@ -20,7 +20,7 @@ from .desktop import EmergencyHotkey
 from .execution import RunContext
 from .provider import Provider, ProviderError
 from .scheduler import Scheduler
-from .store import Store
+from .store import Store, now
 from .tools import ToolRunner
 
 
@@ -44,9 +44,21 @@ def create_app(data_dir=None, provider_factory=Provider):
     session = secrets.token_urlsafe(32)
     static = Path(__file__).parent / "static"
 
+    def retire_pending_reviews():
+        if settings.values['permissions_mode'] != 'autonomous':
+            return
+        # Do not replay old effects merely because the execution mode changed.
+        # Clear the obsolete approval barrier so the next user request can run.
+        pending = store.rows("SELECT DISTINCT conversation_id FROM approvals WHERE status IN ('pending','deferred')")
+        for item in pending:
+            assistant.close_unanswered(item['conversation_id'], 'Execution mode changed. Previous queued actions were not run; continue from a fresh user request.')
+            store.execute("UPDATE workflows SET status='cancelled',detail=?,updated_at=? WHERE conversation_id=? AND status='awaiting_confirmation'",
+                          ('Old queued actions were retired after switching to automatic execution.', now(), item['conversation_id']))
+
     @asynccontextmanager
     async def lifespan(app):
         store.recover()
+        retire_pending_reviews()
         emergency.start()
         discovery = asyncio.create_task(asyncio.to_thread(services.applications.refresh)) if services.applications.adapter.supported else None
         timer = asyncio.create_task(scheduler.loop())
@@ -124,7 +136,9 @@ def create_app(data_dir=None, provider_factory=Provider):
     async def update_settings(body: dict):
         if assistant.active:
             raise ValueError("Wait for the current action to finish before changing settings")
-        return settings.update(body)
+        result = settings.update(body)
+        retire_pending_reviews()
+        return result
 
     @app.post("/api/provider/check")
     async def check_provider():

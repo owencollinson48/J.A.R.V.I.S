@@ -61,10 +61,12 @@ setInterval(setDates, 60000);
 
 function showView(view) {
   state.view = view;
+  document.body.dataset.view = view;
+  if(view !== 'chat') setConversationOpen(false);
   $$('.main-column > main').forEach(el => { el.hidden = el.id !== view + '-view'; });
   $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.view === view));
   $('#view-title').textContent = {chat:'Assistant', planner:'My planner', files:'Computer', memory:'Memory', settings:'Settings', applications:'Applications', activity:'Activity'}[view];
-  $('#sidebar').classList.remove('open');
+  $('#sidebar').classList.remove('open'); $('#menu-button').setAttribute('aria-expanded','false');
   if (view === 'files' && !state.currentPath) loadFiles();
   if (view === 'planner') renderPlanner();
   if (view === 'memory') renderMemories();
@@ -73,10 +75,23 @@ function showView(view) {
   if (view === 'activity') loadActivity().catch(errorToast);
   voiceSession?.refreshContext();
   if(view==='activity') JarvisHUD.updateWorkflow(state.workflow,state.flowActions);
+  if(view==='chat') JarvisHUD.showTaskFlow();
 }
-$$('[data-view]').forEach(el => el.addEventListener('click', () => showView(el.dataset.view)));
+$$('button[data-view]').forEach(el => el.addEventListener('click', () => showView(el.dataset.view)));
 $$('[data-open-view]').forEach(el => el.addEventListener('click', () => showView(el.dataset.openView)));
-$('#menu-button').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+$('#menu-button').addEventListener('click', () => { const open=$('#sidebar').classList.toggle('open'); $('#menu-button').setAttribute('aria-expanded',String(open)); });
+function setConversationOpen(open) {
+  $('#conversation-panel').hidden = !open;
+  $('#conversation-toggle').setAttribute('aria-expanded',String(open));
+  if(open) { scrollChat(); if(!state.busy) $('#chat-input').focus(); }
+  else if(document.activeElement && $('#conversation-panel').contains(document.activeElement)) $('#conversation-toggle').focus();
+}
+$('#conversation-toggle').onclick = () => { showView('chat'); setConversationOpen($('#conversation-panel').hidden); };
+$('#close-conversation').onclick = () => setConversationOpen(false);
+$('#quick-settings').onclick = () => showView('settings');
+document.addEventListener('keydown', event => {
+  if(event.key==='Escape' && !state.busy && !state.active.length && !state.approvals.length) { setConversationOpen(false); $('#sidebar').classList.remove('open'); $('#menu-button').setAttribute('aria-expanded','false'); }
+});
 $('#notifications-button').addEventListener('click', () => { state.planner = 'reminders'; showView('planner'); });
 $('#access-settings').addEventListener('click', () => showView('settings'));
 $('#attach-button').addEventListener('click', () => showView('files'));
@@ -86,7 +101,7 @@ function renderConversations() {
   root.innerHTML = state.conversations.length ? state.conversations.map(c => `<div class="conversation-item ${c.id === state.conversation ? 'active' : ''}"><button data-conversation="${c.id}" title="${escapeHTML(c.title)}">${escapeHTML(c.title)}</button><button class="delete-chat" data-delete-conversation="${c.id}" aria-label="Delete conversation">×</button></div>`).join('') : '<p class="sidebar-empty">A fresh start. What’s on your mind?</p>';
   $$('[data-conversation]', root).forEach(el => el.onclick = () => loadConversation(el.dataset.conversation).catch(errorToast));
   $$('[data-delete-conversation]', root).forEach(el => el.onclick = async () => {
-    if (!confirm('Delete this conversation? Saved memories and planner items will remain.')) return;
+    if (state.settings?.permissions_mode !== 'autonomous' && !confirm('Delete this conversation? Saved memories and planner items will remain.')) return;
     try { await remove('/conversations/' + el.dataset.deleteConversation); if (state.conversation === el.dataset.deleteConversation) newChat(); await refresh(); } catch(e) { errorToast(e); }
   });
 }
@@ -96,7 +111,7 @@ function newChat() {
   state.conversation = null; state.approvals = []; localStorage.removeItem('jarvis-conversation');
   state.workflow = null; state.flowActions = []; renderWorkflow();
   $('#messages').innerHTML = ''; $('#approval-list').innerHTML = ''; $('#welcome').hidden = false; $('#chat-error').hidden = true;
-  renderConversations(); showView('chat'); $('#chat-input').focus();
+  renderConversations(); showView('chat'); setConversationOpen(false);
 }
 $('#new-chat').onclick = newChat;
 document.addEventListener('keydown', event => { if (event.key.toLowerCase() === 'n' && !event.ctrlKey && !event.metaKey && !event.altKey && !['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)) { event.preventDefault(); newChat(); } });
@@ -163,20 +178,20 @@ async function stream(path, body) {
         if (event.type === 'action') { const update=event.action; const index=state.flowActions.findIndex(action=>action.id===update.id); if(index<0) state.flowActions.push(update); else state.flowActions[index]={...state.flowActions[index],...update}; renderWorkflow(); }
         if (event.type === 'tool') { const action=state.flowActions.find(action=>action.id===event.action_id); if(action) action.status=event.status || (event.ok?'completed':'failed'); renderWorkflow(); showWorking(event.ok ? `${event.name.replaceAll('_',' ')} · done` : `${event.name.replaceAll('_',' ')} · not completed`); }
         if (event.type === 'approval') { state.approvals.push(event.approval); renderApprovals(); scrollChat(); }
-        if (event.type === 'error') { outcome.error = event.message; $('#chat-error').textContent = event.message; $('#chat-error').hidden = false; }
+        if (event.type === 'error') { toast(event.message); outcome.error = event.message; $('#chat-error').textContent = event.message; $('#chat-error').hidden = false; }
         if (event.type === 'cancelled') { outcome.text = event.message; outcome.cancelled = true; showWorking('Task cancelled'); }
         if (event.type === 'done') { doneEvent = true; state.active = []; }
       }
     }
     if (!doneEvent) throw new Error('Connection interrupted. Refresh this conversation to see the saved result.');
-  } catch(error) { outcome.error = error.message; $('#chat-error').textContent = error.message; $('#chat-error').hidden = false; }
+  } catch(error) { toast(error.message); outcome.error = error.message; $('#chat-error').textContent = error.message; $('#chat-error').hidden = false; }
   finally {
     $('#working')?.remove(); setBusy(false); const view = state.view;
     try { if (state.conversation) await loadConversation(state.conversation, true); if (view !== 'chat') showView(view); await refresh(); }
     catch (error) { outcome.error ||= error.message; errorToast(error); }
     outcome.approvals = state.approvals.length;
     updateStopButton();
-    if (state.view === 'chat' && !voiceSession?.enabled) $('#chat-input').focus();
+    if (state.view === 'chat' && !voiceSession?.enabled && !$('#conversation-panel').hidden) $('#chat-input').focus();
   }
   return outcome;
 }
@@ -207,6 +222,7 @@ $('#chat-input').addEventListener('keydown', event => { if (event.key === 'Enter
 $('#chat-input').addEventListener('input', event => { event.target.style.height = 'auto'; event.target.style.height = Math.min(event.target.scrollHeight, 170) + 'px'; });
 $$('[data-prompt]').forEach(el => el.onclick = () => { $('#chat-input').value = el.dataset.prompt; sendMessage(); });
 function renderApprovals() {
+  if(state.approvals.length) setConversationOpen(true);
   $('#approval-list').innerHTML = state.approvals.map(a => `<section class="approval-card"><h3>${icon('shield')} Your approval is needed</h3><p>${escapeHTML(a.preview.summary)}</p><pre>${escapeHTML(JSON.stringify(a.arguments, null, 2))}</pre>${a.preview.docx_note ? `<p>${escapeHTML(a.preview.docx_note)}</p>` : ''}<p>This action will run on your computer. Existing documents are backed up before replacement.</p><div class="approval-actions"><button class="secondary-button" data-approval="${a.id}" data-decision="false">Decline</button><button class="primary-button" data-approval="${a.id}" data-decision="true">Approve action <span>↗</span></button></div></section>`).join('');
   $$('[data-approval]').forEach(el => { el.disabled = state.busy; el.onclick = async () => { if (state.busy) return; const wasHandsfree = voiceSession.enabled; voiceSession.beginTurn(); const result = await stream('/approvals/' + el.dataset.approval, {approved:el.dataset.decision === 'true'}); await deliverReply(result, wasHandsfree); }; });
   voiceSession?.refreshContext();
@@ -250,7 +266,7 @@ function renderPlanner() {
   $('#planner-list').innerHTML = items.length ? items.map(item => `<article class="planner-item ${item.status === 'done' ? 'done' : ''}">${kind === 'tasks' ? `<button class="task-check ${item.status === 'done' ? 'done' : ''}" data-task-check="${item.id}" aria-label="${item.status === 'done' ? 'Reopen' : 'Complete'} task">${item.status === 'done' ? '✓' : ''}</button>` : `<span class="${kind === 'goals' ? 'green' : 'amber'}">${icon(kind === 'goals' ? 'target' : 'bell')}</span>`}<div class="planner-item-body"><h3>${escapeHTML(item.title)}</h3>${item.details ? `<p>${escapeHTML(item.details)}</p>` : ''}<small>${escapeHTML(kind === 'goals' ? (item.status === 'done' ? 'Completed' : `${state.tasks.filter(t => t.goal_id === item.id && t.status === 'done').length} of ${state.tasks.filter(t => t.goal_id === item.id).length} steps complete`) : kind === 'reminders' && item.acknowledged ? 'Dismissed' : kind === 'reminders' && item.fired_at ? 'Due now' : relativeDue(item.due_at))}</small>${item.goal_id ? `<small> · ${escapeHTML(state.goals.find(g => g.id === item.goal_id)?.title || '')}</small>` : ''}</div><div class="planner-item-actions">${kind === 'goals' ? `<button class="icon-button" data-goal-toggle="${item.id}" aria-label="Toggle goal completion">${item.status === 'done' ? '↶' : '✓'}</button>` : ''}${kind === 'reminders' && !item.acknowledged ? `<button class="icon-button" data-dismiss="${item.id}" aria-label="Dismiss reminder">✓</button>` : ''}${kind !== 'reminders' ? `<button class="icon-button" data-edit-item="${item.id}" aria-label="Edit item">✎</button>` : ''}<button class="icon-button" data-delete-item="${item.id}" aria-label="Delete item">×</button></div></article>`).join('') : empty({tasks:'A fresh page for your day',goals:'Give your next chapter a direction',reminders:'One less thing to hold in your head'}[kind], {tasks:'Add your first task. One small step is a great place to start.',goals:'Save a goal, then break it into manageable tasks.',reminders:'Set a time and let JARVIS remember for you.'}[kind], kind === 'tasks' ? 'check' : kind === 'goals' ? 'target' : 'bell');
   bindTaskChecks($('#planner-list'));
   $$('[data-edit-item]').forEach(el => el.onclick = () => openItem(kind, state[kind].find(i => i.id === el.dataset.editItem)));
-  $$('[data-delete-item]').forEach(el => el.onclick = async () => { if (!confirm('Delete this item?')) return; try { await remove('/' + kind + '/' + el.dataset.deleteItem); await refresh(); } catch(e) { errorToast(e); } });
+  $$('[data-delete-item]').forEach(el => el.onclick = async () => { if (state.settings?.permissions_mode !== 'autonomous' && !confirm('Delete this item?')) return; try { await remove('/' + kind + '/' + el.dataset.deleteItem); await refresh(); } catch(e) { errorToast(e); } });
   $$('[data-goal-toggle]').forEach(el => el.onclick = async () => { const goal = state.goals.find(g => g.id === el.dataset.goalToggle); try { await patch('/goals/' + goal.id, {status:goal.status === 'done' ? 'active' : 'done'}); await refresh(); } catch(e) { errorToast(e); } });
   $$('[data-dismiss]').forEach(el => el.onclick = async () => { try { await patch('/reminders/' + el.dataset.dismiss, {acknowledged:1}); await refresh(); } catch(e) { errorToast(e); } });
 }
@@ -288,7 +304,7 @@ function renderMemories() {
   $('#memory-count').textContent = `${state.memories.length} ${state.memories.length === 1 ? 'memory' : 'memories'}`;
   $('#memory-list').innerHTML = state.memories.length ? state.memories.map(m => `<article class="memory-card"><p>${escapeHTML(m.content)}</p><div class="memory-card-footer"><span>${escapeHTML(new Date(m.created_at).toLocaleDateString(undefined,{month:'short',day:'numeric'}))}</span><div><button class="icon-button" data-edit-memory="${m.id}" aria-label="Edit memory">✎</button><button class="icon-button" data-delete-memory="${m.id}" aria-label="Delete memory">×</button></div></div></article>`).join('') : empty('The beginning of knowing you', 'Add a preference, a useful fact, or something you’d like JARVIS to remember.', 'memory');
   $$('[data-edit-memory]').forEach(el => el.onclick = () => openItem('memories', state.memories.find(m => m.id === el.dataset.editMemory)));
-  $$('[data-delete-memory]').forEach(el => el.onclick = async () => { if (!confirm('Forget this saved memory? Existing conversation history will remain.')) return; try { await remove('/memories/' + el.dataset.deleteMemory); await refresh(); } catch(e) { errorToast(e); } });
+  $$('[data-delete-memory]').forEach(el => el.onclick = async () => { if (state.settings?.permissions_mode !== 'autonomous' && !confirm('Forget this saved memory? Existing conversation history will remain.')) return; try { await remove('/memories/' + el.dataset.deleteMemory); await refresh(); } catch(e) { errorToast(e); } });
 }
 async function searchMemory() {
   try {
@@ -324,7 +340,7 @@ async function previewFile(path) {
   try { const result = await api('/files/read?path=' + encodeURIComponent(path)); state.previewPath = path; $('#file-preview-title').textContent = path; $('#file-content').textContent = result.content + (result.truncated ? '\n\n[Preview truncated]' : ''); $('#file-preview').hidden = false; $('#file-preview').scrollIntoView({behavior:'smooth'}); } catch(e) { errorToast(e); }
 }
 $('#close-preview').onclick = () => { $('#file-preview').hidden = true; };
-$('#discuss-file').onclick = () => { showView('chat'); $('#chat-input').value = `Read this file and help me with it: ${state.previewPath}`; $('#chat-input').focus(); };
+$('#discuss-file').onclick = () => { showView('chat'); setConversationOpen(true); $('#chat-input').value = `Read this file and help me with it: ${state.previewPath}`; $('#chat-input').focus(); };
 
 function populateSettings() {
   const s = state.settings; if (!s) return;
@@ -332,7 +348,8 @@ function populateSettings() {
   $('#provider-key').placeholder = s.has_api_key ? 'Key saved · leave blank to keep' : 'Enter a key to connect';
   $('#access-roots').value = s.roots.join('\n'); $('#user-name').value = s.name;
   $('#native-notifications').checked = s.native_notifications;
-  $('#permissions-mode').value = s.permissions_mode || 'routine';
+  $('#permissions-mode').value = s.permissions_mode || 'autonomous';
+  $('#computer-access').value = s.computer_access || 'full';
   $('#workflow-timeout').value = s.workflow_timeout || 300;
   $('#application-directories').value = (s.application_directories || []).join('\n');
   $('#storage-path').textContent = 'Local data: ' + s.data_dir;
@@ -343,10 +360,10 @@ function updateConnectionUI() {
   $('#model-status').textContent = s.provider_ready ? `${s.model} · Configured and ready to connect` : 'Your workspace is ready · Connect a model to chat';
   $('#model-light').classList.toggle('off', !s.provider_ready);
   $('#profile-name').textContent = s.name || 'Your workspace'; $('#profile-initial').textContent = (s.name || 'You')[0].toUpperCase();
-  $('#permission-note').textContent = s.permissions_mode === 'review' ? 'Computer actions wait for your review.' : 'Requested routine actions run automatically. Significant consequences ask first.';
+  $('#permission-note').textContent = s.permissions_mode === 'autonomous' ? 'Your request is approval. Available computer actions run automatically.' : s.permissions_mode === 'review' ? 'Computer actions wait for your review.' : 'Routine actions run automatically. Significant consequences ask first.';
 }
 async function saveSettings() {
-  const body = {provider_url:$('#provider-url').value.trim(), model:$('#provider-model').value.trim(), roots:$('#access-roots').value.split('\n').map(v => v.trim()).filter(Boolean), name:$('#user-name').value.trim(), native_notifications:$('#native-notifications').checked, permissions_mode:$('#permissions-mode').value, workflow_timeout:Number($('#workflow-timeout').value), application_directories:$('#application-directories').value.split('\n').map(v => v.trim()).filter(Boolean)};
+  const body = {provider_url:$('#provider-url').value.trim(), model:$('#provider-model').value.trim(), roots:$('#access-roots').value.split('\n').map(v => v.trim()).filter(Boolean), name:$('#user-name').value.trim(), native_notifications:$('#native-notifications').checked, permissions_mode:$('#permissions-mode').value, computer_access:$('#computer-access').value, workflow_timeout:Number($('#workflow-timeout').value), application_directories:$('#application-directories').value.split('\n').map(v => v.trim()).filter(Boolean)};
   if ($('#provider-key').value) body.api_key = $('#provider-key').value.trim();
   state.settings = await patch('/settings', body); $('#provider-key').value = ''; updateConnectionUI(); populateSettings(); return state.settings;
 }
@@ -395,6 +412,8 @@ voiceSession = new JarvisVoice.VoiceSession({
     document.body.dataset.voicePhase = phase;
     $('#voice-session').hidden = !enabled;
     $('#voice-skip').hidden = phase !== 'speaking';
+    $('#front-skip').hidden = phase !== 'speaking';
+    $('#front-voice-stop').hidden = !enabled;
     $('#voice-session-status').textContent = {starting:'Opening microphone…', listening:'I’m listening', thinking:'Thinking…', speaking:'Speaking', approval:'Waiting for your approval', paused:'Voice paused', off:'Voice off'}[phase] || phase;
     if (phase === 'listening') $('#voice-transcript').textContent = 'Go ahead. I’m listening.';
     if (phase === 'speaking') $('#voice-transcript').textContent = 'I’ll listen again after this reply.';
@@ -419,8 +438,8 @@ function toggleHandsfree() {
 }
 $$('[data-voice-toggle]').forEach(el => el.onclick = toggleHandsfree);
 $('#handsfree-toggle').onclick = $('#mic-button').onclick = toggleHandsfree;
-$('#voice-stop').onclick = () => voiceSession.stop();
-$('#voice-skip').onclick = () => voiceSession.skipReply();
+$('#voice-stop').onclick = $('#front-voice-stop').onclick = () => voiceSession.stop();
+$('#voice-skip').onclick = $('#front-skip').onclick = () => voiceSession.skipReply();
 $('#speak-toggle').onclick = () => {
   if (!window.speechSynthesis) { toast('Speech playback is unavailable in this browser.'); return; }
   if (voiceSession.enabled) { voiceSession.stop(); state.speaking = false; }
@@ -529,7 +548,7 @@ async function init() {
     $$('[data-drive]').forEach(el => el.onclick = () => { const values = $('#access-roots').value.split('\n'); if (!values.includes(el.dataset.drive)) $('#access-roots').value += '\n' + el.dataset.drive; });
     await refresh();
     const id = localStorage.getItem('jarvis-conversation'); if (id && state.conversations.some(c => c.id === id)) await loadConversation(id);
-  } catch(e) { $('#chat-error').textContent = 'Could not reach your local JARVIS server. ' + e.message; $('#chat-error').hidden = false; }
+  } catch(e) { const message='Could not reach your local JARVIS server. ' + e.message; $('#chat-error').textContent = message; $('#chat-error').hidden = false; toast(message); }
 }
 init();
 setInterval(() => { refresh().catch(() => {}); }, 5000);

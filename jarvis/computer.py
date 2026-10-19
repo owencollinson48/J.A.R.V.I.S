@@ -16,21 +16,30 @@ class Computer:
     def __init__(self, settings):
         self.settings = settings
 
+    def default_folder(self):
+        folder = Path(self.settings.values['roots'][0]).expanduser()
+        if self.settings.values.get('computer_access') == 'full':
+            try: available = folder.is_dir()
+            except OSError: available = False
+            if not available: folder = Path.home()
+        return folder.resolve()
+
     def path(self, value):
         path = Path(value).expanduser()
         if not path.is_absolute():
-            path = Path(self.settings.values["roots"][0]) / path
+            path = self.default_folder() / path
         path = path.resolve()
-        roots = [Path(r).resolve() for r in self.settings.values["roots"]]
-        if not any(path.is_relative_to(root) for root in roots):
-            raise ValueError("This path is outside computer access folders. Add its folder in Settings.")
-        # App configuration and backups contain private state, not assistant documents.
-        if path == self.settings.data_dir or path.is_relative_to(self.settings.data_dir):
-            raise ValueError("JARVIS private data is managed through the app, not file tools")
+        if self.settings.values.get('computer_access') != 'full':
+            roots = [Path(r).resolve() for r in self.settings.values["roots"]]
+            if not any(path.is_relative_to(root) for root in roots):
+                raise ValueError("This path is outside computer access folders. Add its folder in Settings.")
+            # Folder-restricted mode also keeps managed app state out of scope.
+            if path == self.settings.data_dir or path.is_relative_to(self.settings.data_dir):
+                raise ValueError("JARVIS private data is managed through the app, not file tools")
         return path
 
     def list_files(self, path=None):
-        folder = self.path(path or self.settings.values["roots"][0])
+        folder = self.path(path or str(self.default_folder()))
         if not folder.is_dir():
             raise ValueError("Choose a folder")
         entries = []
@@ -48,34 +57,49 @@ class Computer:
                 "limited": len(entries) >= 200}
 
     def search_files(self, query, directory=None, search_content=False):
-        root = self.path(directory or self.settings.values["roots"][0])
         if not query.strip():
             raise ValueError("Enter a search phrase")
-        results, scanned = [], 0
+        full_access = self.settings.values.get('computer_access') == 'full'
+        locations = ([directory] if directory else
+                     [str(self.default_folder()), *self.settings.values['roots'], *(self.drives() if full_access else [])])
+        roots = list(dict.fromkeys(self.path(value) for value in locations))
+        results, scanned, denied, seen = [], 0, 0, set()
+        phrase = query.lower()
         deadline = time.monotonic() + 8
-        for base, directories, filenames in os.walk(root, followlinks=False):
-            directories[:] = [d for d in directories if d not in SKIP_DIRECTORIES and not d.startswith(".")]
-            for name in filenames:
-                scanned += 1
-                if scanned > 10000 or time.monotonic() > deadline:
-                    return {"results": results, "limited": True, "files_scanned": scanned}
-                item = Path(base) / name
-                try:
-                    item = self.path(str(item))
-                    snippet = ""
-                    match = query.lower() in name.lower()
-                    if search_content and item.suffix.lower() in TEXT_EXTENSIONS and item.stat().st_size < 512000:
-                        text = item.read_text(encoding="utf-8", errors="replace")
-                        index = text.lower().find(query.lower())
-                        if index >= 0:
-                            match, snippet = True, text[max(0, index - 80):index + 220]
-                    if match:
-                        results.append({"path": str(item), "name": name, "snippet": snippet})
-                except (OSError, ValueError):
-                    continue
-                if len(results) >= 40:
-                    return {"results": results, "limited": True, "files_scanned": scanned}
-        return {"results": results, "limited": False, "files_scanned": scanned}
+        def response(limited):
+            return {"results": results, "limited": limited, "files_scanned": scanned,
+                    "locations": [str(root) for root in roots], "unreadable_locations": denied}
+        def unreadable(_error):
+            nonlocal denied
+            denied += 1
+        for root in roots:
+            for base, directories, filenames in os.walk(root, followlinks=False, onerror=unreadable):
+                if time.monotonic() > deadline: return response(True)
+                # Full access searches include hidden/system folders too; OS
+                # permissions and the same bounded scan budget still apply.
+                if not full_access:
+                    directories[:] = [d for d in directories if d not in SKIP_DIRECTORIES and not d.startswith(".")]
+                for name in filenames:
+                    item = Path(base) / name
+                    try:
+                        item = self.path(str(item))
+                        if item in seen: continue
+                        seen.add(item)
+                        scanned += 1
+                        if scanned > 10000 or time.monotonic() > deadline: return response(True)
+                        snippet = ""
+                        match = phrase in name.lower()
+                        if search_content and item.suffix.lower() in TEXT_EXTENSIONS and item.stat().st_size < 512000:
+                            text = item.read_text(encoding="utf-8", errors="replace")
+                            index = text.lower().find(phrase)
+                            if index >= 0:
+                                match, snippet = True, text[max(0, index - 80):index + 220]
+                        if match:
+                            results.append({"path": str(item), "name": name, "snippet": snippet})
+                    except (OSError, ValueError):
+                        continue
+                    if len(results) >= 40: return response(True)
+        return response(False)
 
     def read_file(self, path):
         item = self.path(path)
@@ -135,7 +159,7 @@ class Computer:
         elif name in {"open_file", "create_folder"}:
             self.path(args["path"])
         elif name == "run_command":
-            self.path(args.get("directory") or self.settings.values["roots"][0])
+            self.path(args.get("directory") or str(self.default_folder()))
             self.validate_command(args["arguments"])
             preview["summary"] = "Run: " + subprocess.list2cmdline(args["arguments"])
         elif name == "open_application":
@@ -152,7 +176,7 @@ class Computer:
         if cancel: cancel.check()
         item = self.path(path)
         if self.fingerprint(item) != fingerprint:
-            raise ValueError("File changed after the approval was requested. Read it again before editing.")
+            raise ValueError("File changed since the action was prepared. Read it again before editing.")
         backup = None
         if item.exists():
             folder = self.settings.data_dir / "backups"
@@ -256,7 +280,7 @@ class Computer:
         if cancel: cancel.check()
         source, destination = self.path(source), self.path(destination)
         if self.fingerprint(source) != fingerprint:
-            raise ValueError("Source changed since approval")
+            raise ValueError("Source changed since the move was prepared")
         if destination.exists():
             raise ValueError("Destination already exists")
         created = False
@@ -300,12 +324,12 @@ class Computer:
         else:
             command = [executable, *arguments]
         process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   cwd=self.settings.values["roots"][0], shell=False)
+                                   cwd=self.default_folder(), shell=False)
         return {"launched": name, "pid": process.pid}
 
     def run_command(self, arguments, directory=None, cancel=None):
         self.validate_command(arguments)
-        folder = self.path(directory or self.settings.values["roots"][0])
+        folder = self.path(directory or str(self.default_folder()))
         # Temporary files avoid unbounded RAM use from a noisy child process.
         import tempfile
         with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
@@ -337,4 +361,4 @@ class Computer:
     def drives(self):
         if platform.system() == "Windows":
             return [f"{chr(letter)}:\\" for letter in range(65, 91) if Path(f"{chr(letter)}:\\").exists()]
-        return [str(Path.home())]
+        return [str(Path('/'))]

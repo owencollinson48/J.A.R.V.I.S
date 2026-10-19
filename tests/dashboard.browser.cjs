@@ -20,13 +20,15 @@ async function installSpeech(page) {
   Object.defineProperty(window,'SpeechSynthesisUtterance',{value:class {constructor(text){this.text=text;}},configurable:true});
  });
 }
-async function installAPI(page) {
+async function installAPI(page, permissionsMode='autonomous') {
  const messages=[], pending=[], prompts=[], decisions=[];let workflow=null,actions=[];
  const stamp=new Date().toISOString();
+ const settings={provider_ready:true,provider_url:'http://localhost:11434/v1',model:'browser-test-fixture',roots:['/tmp'],name:'Owen',has_api_key:false,native_notifications:false,data_dir:'/tmp/voice-test',permissions_mode:permissionsMode,computer_access:'full',workflow_timeout:300,application_directories:[]};
  await page.route('**/api/**',async route=>{
   const req=route.request(), path=new URL(req.url()).pathname.slice(4), method=req.method();
   let data;
-  if(path==='/status') data={ok:true,settings:{provider_ready:true,provider_url:'http://localhost:11434/v1',model:'browser-test-fixture',roots:['/tmp'],name:'Owen',has_api_key:false,native_notifications:false,data_dir:'/tmp/voice-test'},drives:[],active:[]};
+  if(path==='/status') data={ok:true,settings,drives:[],active:[]};
+  else if(path==='/settings'){if(method==='PATCH')Object.assign(settings,req.postDataJSON());data=settings;}
   else if(path==='/conversations'&&method==='POST') data={id:'c1',title:'New conversation',created_at:stamp,updated_at:stamp};
   else if(path==='/conversations') data=messages.length?[{id:'c1',title:'Voice test',created_at:stamp,updated_at:stamp}]:[];
   else if(path==='/conversations/c1') data={messages,approvals:pending,active:false,workflow,actions};
@@ -35,7 +37,7 @@ async function installAPI(page) {
    workflow={id:'w'+prompts.length,status:'completed',request:content,plan:['Find the application','Open its window']};
    actions=[{id:'step1',workflow_id:workflow.id,name:'search_applications',status:'completed'},{id:'step2',workflow_id:workflow.id,name:'launch_application',status:'completed'}];
    const activity=[{type:'workflow',id:workflow.id,status:'running'},{type:'plan',outcome:content,steps:workflow.plan},...actions.flatMap(a=>[{type:'action',action:{...a,status:'running'}},{type:'tool',action_id:a.id,name:a.name,ok:true,status:'completed'}])];
-   if(content==='Open Calculator'){
+   if(content==='Open Calculator'&&settings.permissions_mode!=='autonomous'){
     const approval={id:'a1',conversation_id:'c1',name:'open_application',arguments:{name:'calculator'},preview:{summary:'Open Calculator'}};
     pending.push(approval);workflow.status='awaiting_confirmation';actions[1].status='awaiting_confirmation';
     await route.fulfill({contentType:'text/event-stream',body:[...activity,{type:'action',action:actions[1]},{type:'approval',approval},{type:'done'}].map(e=>'data: '+JSON.stringify(e)+'\n\n').join('')});return;
@@ -57,12 +59,20 @@ async function installAPI(page) {
 const phase=(page,name)=>page.waitForFunction(name=>document.body.dataset.voicePhase===name,name);
 const words=(page,text)=>page.evaluate(text=>window.testMics.at(-1).words(text),text);
 const finish=(page)=>page.evaluate(()=>window.testSpoken.at(-1).onend());
+const home=async page=>{
+ assert.equal(await page.locator('#jarvis-hud').isVisible(),true);
+ assert.equal(await page.locator('#flow-rail').isVisible(),true);
+ assert.equal(await page.locator('#conversation-panel').isVisible(),false);
+ for(const selector of ['#chat-scroll','#chat-input','.composer-area','#voice-transcript'])assert.equal(await page.locator(selector).isVisible(),false,selector+' must stay in the closed transcript drawer');
+};
+const navigate=async(page,view)=>{await page.locator('#menu-button').click();await page.locator('[data-view="'+view+'"]').click();};
 (async()=>{
  const browser=await chromium.launch({executablePath:process.env.JARVIS_TEST_BROWSER || '/usr/bin/chromium',headless:true,args:['--no-sandbox']});
  try{
   const page=await browser.newPage({viewport:{width:1440,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await installSpeech(page);const api=await installAPI(page);
   await page.goto(process.env.JARVIS_TEST_URL || 'http://127.0.0.1:8765');await page.waitForFunction(()=>document.querySelector('#model-status').textContent.includes('browser-test-fixture'));
+  await home(page);
   assert.equal(await page.locator('.hud-instrument').isVisible(),true);
   const before=await page.locator('.hud-rotate').evaluate(el=>getComputedStyle(el).transform);await page.waitForTimeout(150);
   assert.notEqual(await page.locator('.hud-rotate').evaluate(el=>getComputedStyle(el).transform),before,'idle rings must move');
@@ -73,6 +83,7 @@ const finish=(page)=>page.evaluate(()=>window.testSpoken.at(-1).onend());
   });
   await page.locator('#jarvis-hud').click();await phase(page,'listening');
   await words(page,'Hello JARVIS');await phase(page,'speaking');assert.deepEqual(api.prompts,['Hello JARVIS']);
+  await home(page);
   assert.equal(await page.evaluate(()=>window.testSpoken[0].voice.voiceURI),'gb');
   assert.equal(await page.evaluate(()=>window.testMics.length),1);
   await page.waitForFunction(()=>document.querySelector('#flow-rail .flow-action[data-action-id="step2"][data-status="completed"]'));
@@ -84,29 +95,54 @@ const finish=(page)=>page.evaluate(()=>window.testSpoken.at(-1).onend());
   await page.screenshot({path:'/tmp/jarvis-hud-working.png',fullPage:true});
   await words(page,'This is stale speaker audio');await page.waitForTimeout(1300);assert.equal(api.prompts.length,1);
   await finish(page);await phase(page,'listening');
+  const micCount=await page.evaluate(()=>window.testMics.length);
+  await page.locator('#conversation-toggle').click();
+  assert.equal(await page.locator('#conversation-panel').isVisible(),true);
+  assert.equal(await page.locator('#chat-input').isVisible(),true);
+  assert.match(await page.locator('#messages').textContent(),/Hello JARVIS/);
+  assert.match(await page.locator('#messages').textContent(),/Good evening, Owen/);
+  await phase(page,'listening');assert.equal(await page.evaluate(()=>window.testMics.at(-1).active),true);
+  await page.locator('#close-conversation').click();await home(page);await phase(page,'listening');
+  assert.equal(await page.evaluate(()=>window.testMics.length),micCount,'opening the transcript must preserve the running microphone');
   await words(page,'Plan my day');await phase(page,'speaking');assert.equal(api.prompts.length,2);
-  await finish(page);await phase(page,'listening');
+  await page.locator('#front-skip').click();await phase(page,'listening');await home(page);
   await page.screenshot({path:'/tmp/jarvis-handsfree-desktop.png',fullPage:true});
-  await words(page,'Open Calculator');await phase(page,'speaking');await page.locator('.approval-card').waitFor();
-  await finish(page);await phase(page,'approval');assert.equal(await page.locator('#flow-rail .flow-action[data-status="awaiting_confirmation"]').count(),1);assert.equal(await page.evaluate(()=>window.testMics.at(-1).active),false);assert.deepEqual(api.decisions,[]);
-  await words(page,'Approve action');await page.waitForTimeout(1300);assert.deepEqual(api.decisions,[]);
-  await page.locator('[data-decision="false"]').click();await phase(page,'speaking');assert.deepEqual(api.decisions,[false]);await finish(page);await phase(page,'listening');
-  await page.setViewportSize({width:390,height:844});await page.screenshot({path:'/tmp/jarvis-handsfree-mobile.png',fullPage:true});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
-  await page.locator('#voice-stop').click();await phase(page,'off');
-  await page.locator('#menu-button').click();await page.locator('[data-view="activity"]').click();
+  await words(page,'Open Calculator');await phase(page,'speaking');await home(page);
+  assert.equal(await page.locator('.approval-card').count(),0,'autonomous requests must not show approval cards');assert.deepEqual(api.decisions,[]);
+  await finish(page);await phase(page,'listening');
+  await page.setViewportSize({width:390,height:844});await home(page);await page.screenshot({path:'/tmp/jarvis-handsfree-mobile.png',fullPage:true});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  await page.setViewportSize({width:820,height:900});await home(page);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.screenshot({path:'/tmp/jarvis-hud-tablet.png',fullPage:true});
+  await page.setViewportSize({width:390,height:844});
+  await page.locator('#front-voice-stop').click();await phase(page,'off');
+  await navigate(page,'activity');
   await page.waitForFunction(()=>!document.querySelector('#activity-view').hidden);
   assert.equal(await page.locator('#activity-flow .flow-action').count(),2);assert.ok(await page.locator('#activity-flow .flow-edge').count()>=3);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   await page.screenshot({path:'/tmp/jarvis-hud-mobile-flow.png',fullPage:true});
-  await page.locator('#menu-button').click();await page.locator('[data-view="chat"]').click();await page.locator('#jarvis-hud').click();await phase(page,'listening');
+  await navigate(page,'chat');await home(page);await page.locator('#jarvis-hud').click();await phase(page,'listening');
   await words(page,'Stop listening');await phase(page,'off');assert.equal(api.prompts.length,3);
-  await page.setViewportSize({width:1440,height:1000});await page.locator('[data-view="settings"]').click();
+  await page.setViewportSize({width:1440,height:1000});await navigate(page,'settings');
+  assert.equal(await page.locator('#permissions-mode').inputValue(),'autonomous');
   await page.locator('#voice-select').selectOption('gb');await page.locator('#voice-rate').fill('1.1');await page.locator('#voice-rate').dispatchEvent('input');await page.locator('#voice-preview').click();
   assert.equal(await page.evaluate(()=>window.testSpoken.at(-1).voice.voiceURI),'gb');assert.equal(await page.evaluate(()=>window.testSpoken.at(-1).rate),1.1);await finish(page);
   await page.reload();await page.waitForFunction(()=>document.querySelector('#model-status').textContent.includes('browser-test-fixture'));assert.equal(await page.evaluate(()=>localStorage.getItem('jarvis-voice-uri')),'gb');assert.equal(await page.evaluate(()=>window.testMics.length),0);
-  await page.locator('#handsfree-toggle').click();await phase(page,'listening');await page.evaluate(()=>window.testMics.at(-1).onerror({error:'not-allowed'}));await phase(page,'off');assert.match(await page.locator('#toast').textContent(),/access was denied/);await page.waitForTimeout(800);assert.equal(await page.evaluate(()=>window.testMics.length),1);
+  await home(page);await page.locator('#jarvis-hud').click();await phase(page,'listening');await page.evaluate(()=>window.testMics.at(-1).onerror({error:'not-allowed'}));await phase(page,'off');assert.match(await page.locator('#toast').textContent(),/access was denied/);await page.waitForTimeout(800);assert.equal(await page.evaluate(()=>window.testMics.length),1);
   await page.emulateMedia({reducedMotion:'reduce'});assert.equal(await page.locator('.hud-rotate').evaluate(el=>getComputedStyle(el).animationName),'none');
   assert.deepEqual(errors,[]);
-  console.log('Dashboard E2E passed: animated HUD, speech pulses, connected real-event graph, mobile activity graph, reduced motion; two automatic spoken turns, UK voice selection, no self-echo, approval pause/decline/resume, spoken stop, saved voice/rate, mobile layout, no auto-mic after reload, permission failure; no page errors.');
+
+  // Legacy confirmation is still available when deliberately selected in Settings.
+  const review=await browser.newPage({viewport:{width:1440,height:1000}});const reviewErrors=[];review.on('pageerror',e=>reviewErrors.push(e.message));
+  await installSpeech(review);const reviewAPI=await installAPI(review,'routine');
+  await review.goto(process.env.JARVIS_TEST_URL || 'http://127.0.0.1:8765');await review.waitForFunction(()=>document.querySelector('#model-status').textContent.includes('browser-test-fixture'));
+  await home(review);await review.locator('#jarvis-hud').click();await phase(review,'listening');
+  await words(review,'Open Calculator');await phase(review,'speaking');
+  if(!await review.locator('#conversation-panel').isVisible())await review.locator('#conversation-toggle').click();
+  await review.locator('.approval-card').waitFor();await finish(review);await phase(review,'approval');
+  assert.equal(await review.locator('#flow-rail .flow-action[data-status="awaiting_confirmation"]').count(),1);assert.equal(await review.evaluate(()=>window.testMics.at(-1).active),false);assert.deepEqual(reviewAPI.decisions,[]);
+  await words(review,'Approve action');await review.waitForTimeout(1300);assert.deepEqual(reviewAPI.decisions,[]);
+  await review.locator('[data-decision="false"]').click();await phase(review,'speaking');assert.deepEqual(reviewAPI.decisions,[false]);await finish(review);await phase(review,'listening');
+  await review.locator('#close-conversation').click();await home(review);await phase(review,'listening');
+  await review.locator('#front-voice-stop').click();await phase(review,'off');assert.deepEqual(reviewErrors,[]);
+  console.log('Dashboard E2E passed: minimal circle/flow front page, hidden transcript during speech, transcript drawer without microphone interruption, front-page speech controls, autonomous requests without approval, optional routine approval pause/decline/resume, animated HUD, live connected graph on desktop/mobile, reduced motion, three spoken turns, UK voice selection, no self-echo, spoken stop, saved voice/rate, no auto-mic after reload, permission failure; no page errors.');
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

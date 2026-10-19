@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 
 
 class Settings:
+    ACCESS_POLICY_VERSION = 1
+
     def __init__(self, data_dir=None):
         default = Path(os.getenv("LOCALAPPDATA", Path.home() / ".local" / "share")) / "JARVIS"
         self.data_dir = Path(data_dir or os.getenv("JARVIS_DATA_DIR", default)).resolve()
@@ -20,12 +22,28 @@ class Settings:
             "roots": [str(Path.home())],
             "name": "",
             "native_notifications": True,
-            "permissions_mode": "routine",
+            "permissions_mode": "autonomous",
+            "computer_access": "full",
+            "access_policy_version": self.ACCESS_POLICY_VERSION,
             "application_directories": [],
             "workflow_timeout": 300,
         }
         if self.path.exists():
-            self.values.update(json.loads(self.path.read_text(encoding="utf-8")))
+            saved = json.loads(self.path.read_text(encoding="utf-8"))
+            self.values.update(saved)
+            # Apply the user's new access defaults once to installations created
+            # before this setting existed. Later choices in Settings persist.
+            if saved.get("access_policy_version", 0) < self.ACCESS_POLICY_VERSION:
+                self.values.update(permissions_mode="autonomous", computer_access="full",
+                                   access_policy_version=self.ACCESS_POLICY_VERSION)
+                self._save(self.values)
+
+    def _save(self, values):
+        tmp = self.path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(values, handle, indent=2)
+        os.replace(tmp, self.path)
 
     @property
     def api_key(self):
@@ -36,13 +54,13 @@ class Settings:
         return urlparse(self.values["provider_url"]).hostname in {"localhost", "127.0.0.1", "::1"}
 
     def public(self):
-        return {**{k: v for k, v in self.values.items() if k != "api_key"},
+        return {**{k: v for k, v in self.values.items() if k not in {"api_key", "access_policy_version"}},
                 "has_api_key": bool(self.api_key), "platform": platform.system(),
                 "data_dir": str(self.data_dir), "home": str(Path.home()),
                 "provider_ready": bool(self.api_key) or self.local_provider}
 
     def update(self, changes):
-        allowed = set(self.values)
+        allowed = set(self.values) - {"access_policy_version"}
         if set(changes) - allowed:
             raise ValueError("Unknown settings field")
         with self._lock:
@@ -55,33 +73,34 @@ class Settings:
             candidate["provider_url"] = candidate["provider_url"].rstrip("/")
             if not isinstance(candidate["model"], str) or not candidate["model"].strip():
                 raise ValueError("A model name is required")
+            if candidate['permissions_mode'] not in {'autonomous', 'routine', 'review'}:
+                raise ValueError('Choose autonomous, routine, or review mode')
+            if candidate['computer_access'] not in {'full', 'folders'}:
+                raise ValueError('Choose full computer access or selected folders')
+            full_access = candidate['computer_access'] == 'full'
+            def folder_values(values, label):
+                if not isinstance(values, list): raise ValueError(f'{label} must be a list of folders')
+                folders = []
+                for value in values:
+                    if not isinstance(value, str) or not value.strip() or '\x00' in value:
+                        raise ValueError(f'{label} must contain nonempty folder paths')
+                    if full_access:
+                        # Removable/network locations may currently be offline.
+                        # Remember them without blocking unrelated settings saves.
+                        folders.append(value)
+                    else:
+                        folder = Path(value).expanduser().resolve(strict=True)
+                        if not folder.is_dir(): raise ValueError(f'Not a folder: {value}')
+                        folders.append(str(folder))
+                return list(dict.fromkeys(folders))
             roots = candidate["roots"]
             if not isinstance(roots, list) or not roots:
                 raise ValueError("Add at least one folder for computer access")
-            resolved = []
-            for root in roots:
-                path = Path(root).expanduser().resolve(strict=True)
-                if not path.is_dir():
-                    raise ValueError(f"Not a folder: {root}")
-                resolved.append(str(path))
-            candidate["roots"] = list(dict.fromkeys(resolved))
-            if candidate['permissions_mode'] not in {'routine', 'review'}:
-                raise ValueError('Choose routine autonomy or review mode')
+            candidate["roots"] = folder_values(roots, 'Access folders')
             if not isinstance(candidate['workflow_timeout'], int) or not 30 <= candidate['workflow_timeout'] <= 900:
                 raise ValueError('Workflow timeout must be between 30 and 900 seconds')
-            if not isinstance(candidate['application_directories'], list):
-                raise ValueError('Application directories must be a list of folders')
-            folders = []
-            for value in candidate['application_directories']:
-                folder = Path(value).expanduser().resolve(strict=True)
-                if not folder.is_dir(): raise ValueError('Application discovery paths must be folders')
-                folders.append(str(folder))
-            candidate['application_directories'] = list(dict.fromkeys(folders))
-            tmp = self.path.with_suffix(".tmp")
+            candidate['application_directories'] = folder_values(candidate['application_directories'], 'Application directories')
             # Credentials are local to this OS account; never returned to the browser.
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(candidate, handle, indent=2)
-            os.replace(tmp, self.path)
+            self._save(candidate)
             self.values = candidate
         return self.public()
