@@ -9,9 +9,11 @@ from .execution import Cancelled, Decision, RunContext
 from .provider import ProviderError
 from .store import identifier, now
 from .tools import TOOLS
+from .trading.commands import stop_intent
 
 
 SYSTEM = """You are JARVIS, a calm, capable personal assistant on the user's own computer.
+Trading requests use the integrated deterministic trading tools exclusively. The traded instrument is CME E-mini Nasdaq-100 (NQ); E-mini S&P 500 (ES) is only SMT confirmation. Use trading_status for actual figures/account evidence, trading_control for modes and installed TradingView Desktop connection, trading_backtest for existing historical data, trading_journal for recorded outcomes and trading_research for comparisons. Never generate market prices or present historical CSV as live data. The installed TradingView application is the default execution target; it is not connected until the native adapter verifies its actual selected Paper Trading account. Its native order transport is currently unavailable pending target-PC validation; do not bypass this using raw browser/desktop input or commands. An optional independent paper simulator is a separate explicit backend choice and has its own clearly labelled starting balance/history; never claim its fills or funds belong to TradingView. The model cannot override mandatory signals, sessions, NQ contract specs, risk limits, stale-data suspensions or the persistent emergency stop. Stop promptly on request. Research may propose versions, but replacing the active trading strategy requires an explicit current user approval via trading_strategy activate or the dashboard Activate control. Never reset an emergency stop or change to the independent simulator on your own. Backtests/research use real imported licensed data, causal completed bars and explicit execution assumptions; absent data/insufficient samples are limitations, never evidence of profitability. Keep trading replies concise and report only recorded metrics with their dataset and period.
 Have natural conversations. Interpret indirect requests, slang, and follow-ups using conversation and memory.
 The user's direct request authorizes work toward that request, subject to the selected execution mode below. Execute authorized steps, observe outcomes and continue.
 Be proactive within the requested goal: choose sensible ordinary next steps, carry them out, and continue until the outcome is verified or a specific missing detail genuinely blocks progress. Do not answer a request to do work with instructions the user should perform or a promise to start later. Do not ask for a second go-ahead for routine steps.
@@ -429,6 +431,23 @@ class Assistant:
         await emit({'type':'message','content':text})
 
     async def chat(self, conversation_id, content, emit):
+        stop=stop_intent(content)
+        if stop:
+            self.store.message(conversation_id,{'role':'user','content':content})
+            context=RunContext(self.store,conversation_id,content)
+            self.contexts[conversation_id]=context
+            await emit({'type':'workflow','id':context.id,'status':'running'})
+            args={'action':'mode','mode':'OFF'} if stop=='off' else {'action':stop}
+            action=context.log('trading_control',args,Decision())
+            result=self.tools.trading.control(**args)
+            context.logged_result(action,{'mode':result['mode'],'emergency_stop':result['emergency_stop']})
+            text=('Trading is stopped for today, sir.' if stop=='pause_today' else
+                  'The trading emergency stop is active, sir.' if stop=='emergency' else 'New trading entries are stopped, sir.')
+            saved=self.store.message(conversation_id,{'role':'assistant','content':text})
+            await emit({'type':'token','text':text})
+            await emit({'type':'message','id':saved['id'],'content':text})
+            context.finish('completed')
+            return
         if self.store.pending(conversation_id): raise ValueError('Resolve or cancel the pending consequential action first')
         self.provider.headers()
         self.store.message(conversation_id, {'role':'user','content':content})

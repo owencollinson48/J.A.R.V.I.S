@@ -19,11 +19,14 @@ from .config import Settings
 from .connection import repair_connection, use_sol
 from .desktop import EmergencyHotkey
 from .execution import RunContext
+from .execution import Decision
 from .provider import Provider, ProviderError
 from .scheduler import Scheduler
 from .speech import Speech, SpeechError
 from .store import Store, now
 from .tools import ToolRunner
+from .trading.api import register as register_trading
+from .trading.commands import stop_intent, execution_request
 
 
 class ChatRequest(BaseModel):
@@ -47,7 +50,10 @@ def create_app(data_dir=None, provider_factory=Provider):
     speech = Speech(settings)
     assistant = Assistant(store, settings, ToolRunner(store, computer), provider)
     services = assistant.tools
-    emergency = EmergencyHotkey(assistant.cancel)
+    def stop_all_work():
+        assistant.cancel()
+        services.trading.control('emergency')
+    emergency = EmergencyHotkey(stop_all_work)
     scheduler = Scheduler(store, settings)
     session = secrets.token_urlsafe(32)
     static = Path(__file__).parent / "static"
@@ -66,14 +72,18 @@ def create_app(data_dir=None, provider_factory=Provider):
     @asynccontextmanager
     async def lifespan(app):
         store.recover()
+        services.trading.recover()
         retire_pending_reviews()
         emergency.start()
         discovery = asyncio.create_task(asyncio.to_thread(services.applications.refresh)) if services.applications.adapter.supported else None
         timer = asyncio.create_task(scheduler.loop())
+        trading_timer = asyncio.create_task(services.trading.loop())
         yield
         assistant.cancel()
         emergency.close()
         timer.cancel()
+        trading_timer.cancel()
+        with contextlib.suppress(asyncio.CancelledError): await trading_timer
         try:
             await timer
         except asyncio.CancelledError:
@@ -89,6 +99,8 @@ def create_app(data_dir=None, provider_factory=Provider):
     app.state.store, app.state.settings = store, settings
     app.state.assistant, app.state.scheduler = assistant, scheduler
     app.state.tools = services
+    app.state.trading = services.trading
+    register_trading(app,services.trading,assistant)
 
     @app.middleware("http")
     async def local_access(request, call_next):
@@ -286,11 +298,30 @@ def create_app(data_dir=None, provider_factory=Provider):
         existing(conversation_id)
         if not body.content.strip():
             raise ValueError("Write a message first")
+        stop=stop_intent(body.content)
+        if stop and (assistant.active or store.pending(conversation_id)):
+            args={'action':'mode','mode':'OFF'} if stop=='off' else {'action':stop}
+            result=services.trading.control(**args)
+            for cid in list(assistant.active):
+                running=assistant.contexts.get(cid)
+                if running and execution_request(running.request): assistant.cancel(cid)
+            local=RunContext(store,conversation_id,body.content)
+            action_id=local.log('trading_control',args,Decision())
+            local.logged_result(action_id,{'mode':result['mode'],'emergency_stop':result['emergency_stop']})
+            local.finish('completed')
+            text=('Trading is stopped for today, sir.' if stop=='pause_today' else
+                  'The trading emergency stop is active, sir.' if stop=='emergency' else 'New trading entries are stopped, sir.')
+            async def local_events():
+                for event in ({'type':'message','content':text},
+                    {'type':'outcome','workflow':store.row('SELECT * FROM workflows WHERE id=?',(local.id,)),'approvals':store.pending(conversation_id)},
+                    {'type':'done'}):
+                    yield 'data: '+json.dumps(event)+'\n\n'
+            return StreamingResponse(local_events(),media_type='text/event-stream')
         try:
-            provider.headers()
+            if not stop: provider.headers()
         except ProviderError as exc:
             raise ValueError(str(exc)) from exc
-        if store.pending(conversation_id):
+        if not stop and store.pending(conversation_id):
             raise ValueError("Approve or decline the pending actions first")
         stream = assistant.start(conversation_id, lambda emit: assistant.chat(conversation_id, body.content.strip(), emit))
         return StreamingResponse(stream, media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

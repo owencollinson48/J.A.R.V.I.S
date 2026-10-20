@@ -80,7 +80,7 @@ function showView(view) {
   if(view !== 'chat') setConversationOpen(false);
   $$('.main-column > main').forEach(el => { el.hidden = el.id !== view + '-view'; });
   $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.view === view));
-  $('#view-title').textContent = {chat:'Assistant', planner:'My planner', files:'Computer', memory:'Memory', settings:'Settings', applications:'Applications', activity:'Activity'}[view];
+  $('#view-title').textContent = {chat:'Assistant', planner:'My planner', files:'Computer', memory:'Memory', settings:'Settings', applications:'Applications', activity:'Activity', trading:'Trading Control Centre'}[view];
   $('#sidebar').classList.remove('open'); $('#menu-button').setAttribute('aria-expanded','false');
   if (view === 'files' && !state.currentPath) loadFiles();
   if (view === 'planner') renderPlanner();
@@ -88,6 +88,8 @@ function showView(view) {
   if (view === 'settings') populateSettings();
   if (view === 'applications') loadApplications().catch(errorToast);
   if (view === 'activity') loadActivity().catch(errorToast);
+  if (view === 'trading') window.JarvisTrading?.open();
+  else window.JarvisTrading?.pause();
   voiceSession?.refreshContext();
   if(view==='activity') JarvisHUD.updateWorkflow(state.workflow,state.flowActions);
   if(view==='chat') JarvisHUD.showTaskFlow();
@@ -233,9 +235,12 @@ async function deliverReply(result, wasHandsfree) {
 }
 async function sendMessage(text, {manageVoice = true} = {}) {
   const content = (text ?? $('#chat-input').value).trim();
-  if (!content || state.busy) return {error:'Wait for the current request to finish.'};
-  if (!state.settings?.provider_ready) { showView('settings'); toast('Connect an API provider or local model to start chatting.'); return {error:'Connect a model in Settings before starting voice.'}; }
-  if (state.approvals.length) { toast('Approve or decline your pending actions first.'); showView('chat'); scrollChat(); return {error:'Review the pending computer actions first.'}; }
+  if (!content) return {error:'Write a message first.'};
+  const tradingStop=JarvisVoice.tradingStopIntent(content);
+  if(state.busy && tradingStop){try{return await requestTradingStop(content);}catch(error){toast(error.message);return{error:error.message};}}
+  if (state.busy) return {error:'Wait for the current request to finish.'};
+  if (!state.settings?.provider_ready && !tradingStop) { showView('settings'); toast('Connect an API provider or local model to start chatting.'); return {error:'Connect a model in Settings before starting voice.'}; }
+  if (state.approvals.length && !tradingStop) { toast('Approve or decline your pending actions first.'); showView('chat'); scrollChat(); return {error:'Review the pending computer actions first.'}; }
   const wasHandsfree = voiceSession?.enabled;
   voiceSession?.beginTurn();
   setBusy(true);
@@ -457,6 +462,7 @@ voiceSession = new JarvisVoice.VoiceSession({
   getVoice: replyVoice,
   getRate: replyRate,
   onCancel: () => requestCancellation(false),
+  onTradingStop: text => requestTradingStop(text),
   onBoundary: () => JarvisHUD.pulse(),
   getBlocker: () => (document.hidden && state.settings?.background_voice === false) || state.view !== 'chat' || $('#item-dialog').open ? 'paused' : state.busy ? 'thinking' : state.approvals.length ? 'approval' : null,
   onTurn: text => sendMessage(text, {manageVoice:false}),
@@ -473,7 +479,7 @@ voiceSession = new JarvisVoice.VoiceSession({
     if (phase === 'listening') $('#voice-transcript').textContent = 'Go ahead. I’m listening.';
     if (phase === 'speaking') $('#voice-transcript').textContent = 'I’ll listen again after this reply.';
     if (phase === 'approval') $('#voice-transcript').textContent = 'Review the action in chat. Listening resumes after it is resolved.';
-    if (phase === 'thinking') $('#voice-transcript').textContent = 'Working on your request. Say “cancel task” to stop.';
+    if (phase === 'thinking') $('#voice-transcript').textContent = 'Working on your request. Say “cancel task” or “stop trading” to stop.';
     if (phase === 'paused') $('#voice-transcript').textContent = 'Return to the Assistant tab to continue.';
     $('#welcome').hidden = enabled || !!$('#messages .message');
     $$('[data-voice-toggle]').forEach(el => { el.setAttribute('aria-pressed', String(enabled)); el.setAttribute('aria-label', enabled ? 'End hands-free conversation' : 'Start hands-free conversation'); });
@@ -485,7 +491,7 @@ voiceSession = new JarvisVoice.VoiceSession({
 });
 function toggleHandsfree() {
   if (voiceSession.enabled) { voiceSession.stop(); return; }
-  if (!state.settings?.provider_ready) { showView('settings'); toast('Connect a model first, then click the JARVIS circle.'); return; }
+  if (!state.settings?.provider_ready) toast('Local trading stop commands are available. Other requests need a connected model.');
   if ($('#chat-input').value.trim()) { toast('Send or clear your draft before starting hands-free mode.'); return; }
   if (state.approvals.length) { toast('Review the pending actions before starting hands-free mode.'); return; }
   showView('chat');
@@ -526,6 +532,15 @@ $('#clear-speech-key').onclick = async () => { try { state.settings=await patch(
 window.speechSynthesis?.addEventListener('voiceschanged', populateVoiceChoices);
 populateVoiceChoices(); voiceSession.status('off');
 function updateStopButton() { $('#emergency-stop').hidden = !(state.busy || state.active.length || state.approvals.length); }
+async function requestTradingStop(text) {
+  const intent=JarvisVoice.tradingStopIntent(text);
+  if(!intent)throw new Error('Use a clear trading stop command.');
+  const body=intent==='off'?{action:'mode',mode:'OFF'}:{action:intent};
+  await post('/trading/control',body);
+  const reply=intent==='pause_today'?'Trading is stopped for today, sir.':intent==='emergency'?'The trading emergency stop is active, sir.':'New trading entries are stopped, sir.';
+  toast(reply);window.JarvisTrading?.refresh();
+  return{text:reply};
+}
 async function requestCancellation(endVoice = true) {
   if (endVoice) voiceSession.stop();
   try {

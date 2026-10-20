@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {VoiceSession, chooseVoice, speechChunks, stopIntent} = require('../jarvis/static/voice.js');
+const {VoiceSession, chooseVoice, speechChunks, stopIntent, tradingStopIntent} = require('../jarvis/static/voice.js');
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -193,6 +193,48 @@ test('cancellation intent is conversational and does not match negation or unrel
   for (const text of ['Jarvis, cancel task.', 'Could you please stop?', 'hold on', 'Cancel that please']) assert.equal(stopIntent(text),'task');
   assert.equal(stopIntent('Stop listening'),'listening');
   for (const text of ['Do not cancel','Cancel my dentist appointment','Stop Spotify','I cannot stop thinking']) assert.equal(stopIntent(text),null);
+});
+
+test('local trading stops recognise clear positive commands while rejecting new entries, negation and conditions',()=>{
+  for(const text of ['Jarvis, stop trading.','Could you please halt paper trading?','Turn off automated entries','Disable all trading now','Shut down my trading please'])assert.equal(tradingStopIntent(text),'off',text);
+  for(const text of ['Pause trading for today','Jarvis, stop paper trading for the rest of the day','Stop automated entries for the day'])assert.equal(tradingStopIntent(text),'pause_today',text);
+  for(const text of ['Emergency stop trading','Stop all trading immediately'])assert.equal(tradingStopIntent(text),'emergency',text);
+  for(const text of ['Do not stop trading',"Don't pause trading",'Never disable trading','Stop trading if I lose','Stop trading when the market opens','Explain how to stop trading','What if I stop trading?','The words "stop trading"','Start paper trading','Buy NQ','Close my positions','Stop listening','Stop Spotify','Cancel task'])assert.equal(tradingStopIntent(text),null,text);
+  assert.equal(tradingStopIntent(null),null);
+});
+
+test('task-time trading stop goes directly to the control callback without queuing entries or cancelling unrelated work',async t=>{
+  let complete,cancelled=0;const stops=[],turns=[];
+  const f=fixture({onTurn:text=>{turns.push(text);return new Promise(resolve=>{complete=resolve;});},onCancel:async()=>{cancelled++;},onTradingStop:async text=>{stops.push(text);return{text:'New trading entries are stopped, sir.'};}});
+  t.after(()=>f.session.stop());f.session.start();const task=f.session.commit('Analyse my journal');await wait(15);
+  const mic=f.recognizers[1];mic.words('Start paper trading');mic.words('Buy NQ');mic.words('Do not stop trading');assert.deepEqual(stops,[]);
+  mic.words('Jarvis, stop trading');mic.words('Jarvis, stop trading');await wait(15);
+  assert.deepEqual(stops,['Jarvis, stop trading']);assert.deepEqual(turns,['Analyse my journal']);assert.equal(cancelled,0);assert.equal(f.session.processing,true);
+  assert.equal(f.spoken[0].text,'New trading entries are stopped, sir.');assert.equal(f.spoken[0].lang,'en-GB');assert.equal(f.session.controlRecognition,null,'no self-echo while the stop is acknowledged');
+  f.spoken[0].onend();await wait(15);assert.equal(f.session.phase,'thinking');assert.ok(f.session.controlRecognition,'stop-only recognition resumes while the original task continues');
+  complete({text:'The analysis is complete.'});await wait(10);f.spoken.at(-1).onend();await task;await wait(15);assert.equal(f.session.phase,'listening');
+});
+
+test('a stop-only task microphone works without a general cancellation handler and suppresses late acknowledgement after voice ends',async t=>{
+  let complete,stopped;const stops=[];
+  const f=fixture({onTurn:()=>new Promise(resolve=>{complete=resolve;}),onTradingStop:text=>{stops.push(text);return new Promise(resolve=>{stopped=resolve;});}});
+  t.after(()=>f.session.stop());f.session.start();const task=f.session.commit('Review the latest market data');await wait(15);f.recognizers[1].words('Pause trading for today');await wait(5);
+  assert.deepEqual(stops,['Pause trading for today']);f.session.stop();stopped({text:'Trading is stopped for today, sir.'});complete({text:'Previous task finished.'});await task;await wait(10);
+  assert.equal(f.spoken.length,0);assert.equal(f.session.enabled,false);assert.equal(f.session.controlRecognition,null);
+});
+
+test('failed busy trading stop reports the error and reopens stop controls without sending another model request',async t=>{
+  let complete;const turns=[];const f=fixture({onTurn:text=>{turns.push(text);return new Promise(resolve=>{complete=resolve;});},onTradingStop:async()=>{throw new Error('Connection lost');}});
+  t.after(()=>f.session.stop());f.session.start();const task=f.session.commit('Review the market');await wait(15);f.recognizers[1].words('Stop trading');await wait(15);
+  assert.match(f.errors[0],/trading stop control/);assert.equal(f.session.processing,true);assert.ok(f.session.controlRecognition);assert.deepEqual(turns,['Review the market']);assert.equal(f.spoken.length,0);
+  complete({});await task;
+});
+
+test('reopening voice while an old stop request finishes keeps the new stop microphone available',async t=>{
+  let complete,stopped;const f=fixture({onTurn:()=>new Promise(resolve=>{complete=resolve;}),onTradingStop:()=>new Promise(resolve=>{stopped=resolve;})});
+  t.after(()=>f.session.stop());f.session.start();const task=f.session.commit('Review the market');await wait(15);f.recognizers[1].words('Stop trading');await wait(5);
+  f.session.stop();f.session.start();await wait(15);assert.ok(f.session.controlRecognition);stopped({text:'Old stop acknowledged.'});await wait(10);
+  assert.equal(f.spoken.length,0);assert.ok(f.session.controlRecognition);complete({});await task;
 });
 
 test('completed recognition turns use a shorter pause while continued words reset submission', async t => {

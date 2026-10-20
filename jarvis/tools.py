@@ -1,5 +1,6 @@
 import json
 import math
+import re
 import os
 import shutil
 import uuid
@@ -11,6 +12,8 @@ from .desktop import DesktopControl, Images
 from .execution import Cancelled, PermissionPolicy
 from .visuals import Visuals
 from .checkpoints import Checkpoints
+from .trading.service import TradingService
+from .trading.commands import execution_request, approves_strategy, approves_reset
 
 
 def function(name, description, properties=None, required=None):
@@ -20,6 +23,13 @@ def function(name, description, properties=None, required=None):
 
 S = {"type": "string"}
 TOOLS = [
+    function('trading_status','Read actual NQ trading status, selected execution backend, verified desktop account status, setups, risk and recorded performance. ES is SMT confirmation only. Unavailable values are unknown, never evidence of a connected account.'),
+    function('trading_control','Control integrated PAPER-ONLY trading. connect launches/inspects the installed TradingView Desktop app. mode selects OFF, MONITOR, PAPER or BACKTEST. OFF stops new entries; emergency persistently latches stop and cancels independent simulator pending orders. No live broker or unverified desktop orders are available. reset_emergency requires an explicit user reset request.',{'action':{'type':'string','enum':['connect','mode','emergency','reset_emergency','pause_today','cancel_orders','close_positions']},'mode':{'type':'string','enum':['OFF','MONITOR','PAPER','BACKTEST']},'close_positions':{'type':'boolean'}},['action']),
+    function('trading_journal','Read and search recorded trades and reproducible performance. Paper and backtest datasets remain separate. Select a backtest run for its account-level metrics.',{'dataset':{'type':'string','enum':['paper','backtest']},'query':S,'start':S,'end':S,'run_id':S}),
+    function('trading_backtest','Run a causal historical NQ backtest using imported licensed candles. ES is confirmation only. Supply timezone-aware dates and an existing strategy version. Never invent missing data. Results do not submit TradingView orders.',{'start':S,'end':S,'strategy_id':S,'initial_equity':S}),
+    function('trading_research','Compare saved strategy versions on the same imported NQ/ES history, including holdout/walk-forward tests, bootstrap uncertainty and sample limitations. Research never replaces the active strategy.',{'strategy_ids':{'type':'array','items':S,'maxItems':6},'start':S,'end':S}),
+    function('trading_strategy','Propose a named deterministic strategy variation using changes_json, or activate an existing version only when the CURRENT user explicitly approves that change. Risk/session configuration changes are proposals, never automatically activated.',{'action':{'type':'string','enum':['propose','activate']},'name':S,'changes_json':S,'version_id':S},['action']),
+    function('trading_import','Import an existing user-specified CSV of licensed completed NQ candles, or ES for SMT. Timestamps mean candle close with timezone. Imports are historical research data and never a live feed. Do not create or invent prices.',{'path':S,'source':S,'symbol':{'type':'string','enum':['NQ','ES']},'timeframe_minutes':{'type':'integer','minimum':1,'maximum':60}},['path','source','symbol']),
     function("list_files", "List a folder on the user's computer. Relative paths start in the first access folder.", {"path": S}),
     function("search_files", "Find files by name, optionally search inside text files. Results are bounded; narrow directory for large searches.", {"query": S, "directory": S, "search_content": {"type": "boolean"}}, ["query"]),
     function("read_file", "Read a text or Word .docx document. Check truncated before attempting a rewrite.", {"path": S}, ["path"]),
@@ -83,6 +93,7 @@ class ToolRunner:
         self.images = Images(computer.settings.data_dir)
         self.checkpoints = Checkpoints(store,image_resolver=self.images.path)
         self.desktop = DesktopControl(self.images)
+        self.trading = TradingService(store,self.applications,self.desktop)
         self.browser = BrowserControl(computer.settings, self.images, self.desktop)
         self.policy = PermissionPolicy(computer.settings)
         store.execute('CREATE TABLE IF NOT EXISTS file_changes(action_id TEXT PRIMARY KEY,payload TEXT,status TEXT)')
@@ -168,6 +179,44 @@ class ToolRunner:
         return result
 
     def _run(self, name, args, preview, conversation_id, context):
+        if context and execution_request(context.request):
+            raw_input = (name in {'run_command','write_document','edit_document','move_file','undo_file_change'} or
+                name in {'open_application','launch_application'} and bool(args.get('arguments')) or
+                name=='open_file' and Path(args.get('path','')).suffix.lower() not in {'.txt','.csv','.pdf','.docx','.md'} or
+                name=='desktop_pointer' and args.get('action','click')!='move' or
+                name=='desktop_action' and args.get('action') not in {'focus','maximize','restore','minimize'} or
+                name=='browser_action' and args.get('action') not in {'read','screenshot','navigate'})
+            if raw_input:
+                raise ValueError('Trading execution must use the deterministic trading service. Raw desktop, browser or command input cannot bypass paper-account verification, strategy approval or risk controls.')
+        if name=='trading_status':
+            result=self.trading.snapshot()
+            result.pop('candles',None);result.pop('charts',None);result.pop('analytics',None)
+            result['orders']=result['orders'][-10:];result['setups']=result['setups'][:5]
+            result['strategy_versions']=[{k:v[k] for k in ('id','name','active')} for v in result['strategy_versions']]
+            return result
+        if name=='trading_control':
+            if args['action']=='reset_emergency' and (not context or not approves_reset(context.request)):
+                raise ValueError('Resetting the persistent emergency stop needs an explicit user reset request')
+            return self.trading.control(args['action'],args.get('mode'),args.get('close_positions',False),context)
+        if name=='trading_journal':
+            result=self.trading.journal(**args);result['trade_count']=len(result['trades'])
+            result['trades']=result['trades'][-20:];result.pop('charts',None);result.pop('equity_curve',None)
+            return result
+        if name=='trading_backtest':
+            report=self.trading.backtest(args)
+            return {**{k:report[k] for k in ('id','metrics','coverage','assumptions','initial_equity') if k in report},'trade_count':len(report['trades'])}
+        if name=='trading_research': return self.trading.research(args)
+        if name=='trading_strategy':
+            if args['action']=='activate':
+                if not context or not approves_strategy(context.request): raise ValueError('The current user must explicitly approve replacing the active strategy')
+                return self.trading.activate(args.get('version_id'),approved=True)
+            return self.trading.propose(args.get('name','Strategy proposal'),json.loads(args.get('changes_json','{}')))
+        if name=='trading_import':
+            path=self.computer.path(args['path'])
+            if path.suffix.lower()!='.csv' or not path.is_file(): raise ValueError('Choose an existing user-specified CSV file')
+            if path.stat().st_size>8000000: raise ValueError('Import CSV files up to 8 MB')
+            return self.trading.ingest({'symbol':args['symbol'],'source':args['source'],'kind':'historical',
+                'csv':path.read_text(encoding='utf-8-sig'),'timeframe_minutes':args.get('timeframe_minutes',self.trading.config()['timeframe_minutes'])})
         if name == 'task_checkpoint':
             if not context or conversation_id != context.conversation_id:
                 raise ValueError('A task checkpoint must belong to the active request')

@@ -36,6 +36,17 @@
     return null;
   }
 
+  function tradingStopIntent(text) {
+    if(typeof text!=='string')return null;
+    const value=text.toLowerCase().replace(/[’]/g,"'").replace(/[.!?,]/g,' ').replace(/\s+/g,' ').trim()
+      .replace(/^(?:hey\s+)?(?:jarvis\s+)?(?:(?:please|can you|could you|would you|i want you to)\s+)*/,'')
+      .replace(/\s+(?:please|sir)$/,'');
+    if(/\b(?:don't|do not|dont|never|not|why|explain|what if|how to|example|quote|when|unless|if)\b/.test(value))return null;
+    if(!/^(?:(?:emergency|immediately)\s+)?(?:stop|halt|pause|disable|turn off|shut down)\s+(?:(?:all|my|the|automated|automatic|paper|new|futures|nq|nasdaq)\s+)*(?:trading|trades|automated entries)(?:\s+(?:now|right now|immediately|at once|straight away|for now|for this session|today|for today|for the day|for the rest of (?:the )?day|for the rest of today|for the day today|for the remainder of (?:the )?day|for (?:the )?rest of (?:the )?day|please|sir))*$/.test(value))return null;
+    if(/\b(?:emergency|immediately)\b/.test(value))return 'emergency';
+    return /\b(?:today|day)\b/.test(value)?'pause_today':'off';
+  }
+
   class VoiceSession {
     constructor(options) {
       this.makeRecognition = options.makeRecognition;
@@ -44,6 +55,7 @@
       this.speechPlayer = options.speechPlayer;
       this.onTurn = options.onTurn;
       this.onCancel = options.onCancel;
+      this.onTradingStop = options.onTradingStop;
       this.onBoundary = options.onBoundary || (() => {});
       this.onState = options.onState || (() => {});
       this.onTranscript = options.onTranscript || (() => {});
@@ -65,6 +77,8 @@
       this.emptyEnds = 0;
       this.epoch = 0;
       this.speechEpoch = 0;
+      this.controlStopSequence = 0;
+      this.tradingStopRequested = false;
     }
 
     status(phase) {
@@ -87,6 +101,8 @@
     stop(message = '') {
       this.enabled = false;
       this.epoch++;
+      this.tradingStopRequested = false;
+      this.controlStopSequence++;
       this.clear(this.restartTimer);
       this.haltRecognition();
       this.stopControlListener();
@@ -213,6 +229,8 @@
     beginTurn() {
       this.processing = true;
       this.cancelRequested = false;
+      this.tradingStopRequested = false;
+      this.controlStopSequence = (this.controlStopSequence || 0)+1;
       this.haltRecognition();
       this.stopControlListener();
       this.cancelSpeech();
@@ -332,12 +350,12 @@
     }
 
     scheduleControlListener() {
-      if (!this.onCancel || !this.enabled || !this.processing || this.speaking || this.cancelRequested || this.controlRecognition) return;
+      if (!(this.onCancel || this.onTradingStop) || !this.enabled || !this.processing || this.speaking || this.cancelRequested || this.tradingStopRequested || this.controlRecognition) return;
       const blocker = this.getBlocker();
       if (blocker && blocker !== 'thinking') return;
       this.clear(this.controlTimer);
       this.controlTimer = this.delay(() => {
-        if (!this.enabled || !this.processing || this.speaking || this.cancelRequested || (this.getBlocker() && this.getBlocker() !== 'thinking')) return;
+        if (!this.enabled || !this.processing || this.speaking || this.cancelRequested || this.tradingStopRequested || (this.getBlocker() && this.getBlocker() !== 'thinking')) return;
         try {
           const microphone = this.makeRecognition();
           this.controlRecognition = microphone;
@@ -350,7 +368,23 @@
             if (!latest || latest.isFinal === false) return;
             const intent = stopIntent(latest[0].transcript);
             if (intent === 'listening') { this.stop(); return; }
-            if (intent !== 'task') return; // Task-time microphone accepts cancellation only.
+            const trading=tradingStopIntent(latest[0].transcript);
+            if(trading && this.onTradingStop){
+              const text=latest[0].transcript.trim(),epoch=this.epoch,sequence=++this.controlStopSequence;
+              this.tradingStopRequested=true;
+              this.stopControlListener();
+              Promise.resolve().then(()=>this.onTradingStop(text)).then(async result=>{
+                if(epoch!==this.epoch || sequence!==this.controlStopSequence || !this.enabled)return;
+                if(result?.error){this.onError(result.error);return;}
+                if(result?.text && this.processing && !this.speaking)await this.speak(result.text);
+              }).catch(()=>{if(epoch===this.epoch)this.onError('Could not reach the trading stop control. Use Emergency stop in Trading or Ctrl+C in the JARVIS terminal.');}).finally(()=>{
+                if(sequence!==this.controlStopSequence)return;
+                this.tradingStopRequested=false;
+                if(epoch===this.epoch && this.enabled && this.processing && !this.speaking)this.scheduleControlListener();
+              });
+              return;
+            }
+            if (intent !== 'task' || !this.onCancel) return; // Busy recognition accepts stops only, never new entries.
             this.cancelRequested = true;
             this.stopControlListener();
             Promise.resolve(this.onCancel()).catch(() => this.onError('Could not request cancellation. Use Stop task or the Windows emergency hotkey.'));
@@ -368,7 +402,7 @@
     }
   }
 
-  const exported = {VoiceSession, chooseVoice, speechChunks, stopIntent};
+  const exported = {VoiceSession, chooseVoice, speechChunks, stopIntent, tradingStopIntent};
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
   else root.JarvisVoice = exported;
 })(typeof window !== 'undefined' ? window : globalThis);

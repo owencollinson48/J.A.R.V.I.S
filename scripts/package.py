@@ -7,7 +7,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parent.parent
 output = root / "dist" / "JARVIS-Windows.zip"
 output.parent.mkdir(exist_ok=True)
-files = [root / name for name in ("README.md", "Start JARVIS.bat", "requirements.txt", "requirements-dev.txt", "constraints.txt", "run.py", "start.py", "pytest.ini", ".gitignore")]
+files = [root / name for name in ("README.md", "TRADING.md", "Start JARVIS.bat", "requirements.txt", "requirements-dev.txt", "constraints.txt", "run.py", "start.py", "pytest.ini", ".gitignore")]
 files += [path for folder in ("jarvis", "tests", "scripts") for path in (root / folder).rglob("*")
           if path.is_file() and "__pycache__" not in path.parts and path.suffix in {".py", ".js", ".cjs", ".css", ".html", ".svg", ".sh"}]
 with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
