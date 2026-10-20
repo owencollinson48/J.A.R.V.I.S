@@ -23,6 +23,7 @@ async function fixture(page){
     if(path.startsWith('/trading')){
       calls.push({path,method,body:method==='GET'?null:request.postDataJSON(),header:request.headers()['x-jarvis-client']});
       if(path==='/trading'&&method==='GET')data=snapshot;
+      else if(path==='/trading/connection/report')data={generated_at:stamp,connection:snapshot.connection.tradingview,note:'Local fixture report; screenshot metadata only.'};
       else if(path==='/trading/control'){
         const body=request.postDataJSON();
         if(body.action==='mode'&&body.mode==='PAPER'&&snapshot.connection.adapter!=='independent_paper'){
@@ -31,7 +32,7 @@ async function fixture(page){
         if(body.action==='mode')snapshot.mode=body.mode;
         if(body.action==='emergency'){snapshot.mode='OFF';snapshot.emergency_stop=true;snapshot.suspension_reason='Emergency stop: new entries are disabled.';}
         if(body.action==='reset_emergency'){snapshot.emergency_stop=false;snapshot.suspension_reason='';}
-        data={message:body.action==='connect'?'TradingView remains unverified.':'Control saved.'};
+        data=body.action==='connect'?{reason:'TradingView remains unverified.'}:{message:'Control saved.'};
       }else if(path==='/trading/config'){
         const body=request.postDataJSON();if(body.execution_backend){snapshot.execution_backend=body.execution_backend;snapshot.config.execution_backend=body.execution_backend;snapshot.connection.adapter=body.execution_backend;data={message:'Execution connection selected.'};}
         else {snapshot.strategy_versions.push({id:'v3',name:'Proposed configuration',active:false,created_at:stamp});data={strategy_id:'v3'};}
@@ -75,6 +76,27 @@ async function tab(page,name){await page.locator('[data-trading-tab="'+name+'"]'
     assert.equal(await page.locator('#trading-mode').textContent(),'OFF');assert.equal(await page.locator('#trading-account-metrics .trading-metric strong').first().textContent(),'—','an unverified TradingView connection must not show the simulator balance as account balance');
     assert.equal(await page.locator('#trading-account-metrics .trading-metric strong').nth(4).textContent(),'—','simulator P/L must not appear as native TradingView P/L');assert.match(await page.locator('#trading-positions').textContent(),/have not been read/);
     assert.deepEqual(api.calls.filter(call=>call.method!=='GET'),[],'loading the dashboard must perform no control action');
+    api.snapshot.connection.tradingview.application_visible=true;api.snapshot.connection.tradingview.stage='accessibility_unavailable';
+    api.snapshot.connection.tradingview.observed_at='2026-10-19T14:00:00Z';
+    api.snapshot.connection.tradingview.diagnostics={checks:[{name:'Installed application',status:'passed',detail:'TradingView.exe visible'},{name:'Accessible controls',status:'failed',detail:'UI Automation unavailable <img src=x onerror="window.connectionInjected=true">'}],actions:[{name:'Open Trading Panel',status:'unknown',detail:'No safe observed target'}],controls:[{name:'<img src=x onerror="window.connectionInjected=true">',type:'Text',text:'Paper Trading'}]};
+    api.snapshot.connection.tradingview.screenshot={image_id:'a'.repeat(32),window_id:7};
+    await page.locator('#trading-refresh').click();await page.waitForFunction(()=>document.querySelector('#trading-connection').textContent.includes('app observed'));
+    assert.match(await page.locator('#trading-connection-stage').textContent(),/controls could not be read/);
+    assert.match(await page.locator('#trading-connection-checks').textContent(),/TradingView.exe visible/);
+    assert.match(await page.locator('#trading-connection-actions').textContent(),/No safe observed target/);
+    assert.equal(await page.locator('#trading-connection-checks img').count(),0);assert.equal(await page.locator('#trading-observed-controls img').count(),0);assert.equal(await page.evaluate(()=>window.connectionInjected),undefined);
+    assert.equal(await page.locator('#trading-connection-screenshot').getAttribute('href'),'/api/screenshots/'+'a'.repeat(32));
+    assert.equal(await page.locator('#trading-connection-screenshot').getAttribute('rel'),'noopener noreferrer');
+    const beforeReportActions=api.calls.filter(call=>call.method!=='GET').length,reportDownload=page.waitForEvent('download');await page.locator('#trading-download-connection-report').click();
+    const connectionDownload=await reportDownload;assert.equal(connectionDownload.suggestedFilename(),'JARVIS-TradingView-connection.json');
+    const connectionStream=await connectionDownload.createReadStream();let connectionJSON='';for await(const chunk of connectionStream)connectionJSON+=chunk.toString();const connectionReport=JSON.parse(connectionJSON);
+    assert.equal(connectionReport.connection.diagnostics.checks[1].status,'failed');assert.equal(connectionReport.connection.screenshot.image_id,'a'.repeat(32));assert.equal(connectionReport.connection.verified,false);
+    assert.equal(api.calls.filter(call=>call.method!=='GET').length,beforeReportActions,'downloading diagnostics must not connect, change mode or send orders');
+    assert.equal(api.calls.filter(call=>call.path==='/trading/connection/report').at(-1).method,'GET');
+    api.snapshot.connection.tradingview.screenshot={image_id:'javascript:alert(1)'};await page.locator('#trading-refresh').click();await page.waitForFunction(()=>document.querySelector('#trading-connection-screenshot').hidden);
+    assert.equal(await page.locator('#trading-connection-screenshot').getAttribute('href'),null,'untrusted screenshot identifiers must not create a link');
+    api.snapshot.connection.tradingview.application_visible=false;delete api.snapshot.connection.tradingview.stage;delete api.snapshot.connection.tradingview.diagnostics;delete api.snapshot.connection.tradingview.screenshot;
+
     api.snapshot.connection.tradingview.connected=true;api.snapshot.connection.tradingview.verified=true;api.snapshot.account.currency=null;await page.locator('#trading-refresh').click();await page.waitForFunction(()=>document.querySelector('#trading-account-provenance').textContent.includes('currency was not identified'));
     assert.equal(await page.locator('#trading-account-metrics .trading-metric strong').first().textContent(),'100,000');assert.equal(await page.locator('#trading-account-metrics .trading-metric strong').nth(4).textContent(),'—');assert.equal(await page.locator('#trading-account-metrics .trading-metric strong').nth(5).textContent(),'—','unread native positions must remain unknown, rather than a simulator zero');
     api.snapshot.connection.tradingview.connected=false;api.snapshot.connection.tradingview.verified=false;api.snapshot.account.currency='USD';await page.locator('#trading-refresh').click();await page.waitForFunction(()=>document.querySelector('#trading-connection').textContent.includes('not verified'));
@@ -88,7 +110,7 @@ async function tab(page,name){await page.locator('[data-trading-tab="'+name+'"]'
     await page.locator('#trading-reset').click();await page.waitForFunction(()=>document.querySelector('#trading-suspension').hidden);
     await page.locator('details.trading-card').first().locator('summary').click();await page.locator('#trading-risk').fill('0.75');await page.locator('#trading-config-form button[type=submit]').click();await page.waitForFunction(()=>document.querySelector('#trading-message').textContent.includes('Configuration proposed'));
     assert.equal(api.snapshot.active_strategy_id,'v1');assert.equal(api.calls.find(call=>call.path==='/trading/config'&&!call.body.execution_backend).body.risk_pct,.75);
-    await tab(page,'market');assert.equal(await page.locator('#trading-market-chart svg').count(),1);assert.equal(await page.locator('#trading-market-chart .trading-zone').count(),1);await page.locator('#trading-setups summary').click();assert.match(await page.locator('.trading-conditions').textContent(),/No completed close/);
+    await tab(page,'market');assert.equal(await page.locator('#trading-market-chart svg').count(),1);assert.equal(await page.locator('#trading-market-chart .trading-zone').count(),1);await page.locator('#trading-setups summary').click();assert.match(await page.locator('#trading-setups .trading-conditions').textContent(),/No completed close/);
     await page.locator('[data-trading-panel=market] details.trading-card summary').click();await page.locator('#trading-import-source').fill('Authorised test fixture; NQ dated contract');await page.locator('#trading-import-csv').fill('time,open,high,low,close\n2026-10-19T14:00:00Z,21000,21005,20998,21003');await page.locator('#trading-import-form button[type=submit]').click();await page.waitForFunction(()=>document.querySelector('#trading-data-status').textContent.includes('Authorised test fixture'));
     const imported=api.calls.find(call=>call.path==='/trading/data');assert.equal(imported.body.kind,'historical');assert.equal(imported.body.symbol,'NQ');assert.equal(imported.header,'dashboard');
     await tab(page,'backtest');await page.locator('#trading-backtest-form button[type=submit]').click();await page.waitForFunction(()=>document.querySelector('#trading-backtest-result').textContent.includes('stop is applied first'));
@@ -113,6 +135,6 @@ async function tab(page,name){await page.locator('[data-trading-tab="'+name+'"]'
     await page.evaluate(()=>window.tradingTestMics.at(-1).words('Start paper trading'));await page.waitForFunction(()=>document.body.dataset.view==='settings');
     assert.deepEqual(api.chatCalls,['Stop trading'],'a missing model must not turn an ordinary start command into a local control');assert.equal(api.snapshot.mode,'OFF');
     assert.deepEqual(errors,[]);
-    console.log('Trading UI checks passed: untouched circle front page, explicit desktop/simulator connection, blocked unverified start, emergency latch/reset, proposed settings and explicit activation, real-data import form, separate backtest analytics, interactive chart inspection, safe text, journal details/export, mobile layout and model-independent spoken stops. Fixtures use no real account or orders.');
+    console.log('Trading UI checks passed: staged desktop diagnostics, safe control labels, read-only connection report download, validated local screenshot links, untouched circle front page, explicit desktop/simulator connection, blocked unverified start, emergency latch/reset, proposed settings and explicit activation, real-data import form, separate backtest analytics, interactive chart inspection, safe text, journal details/export, mobile layout and model-independent spoken stops. Fixtures use no real account or orders.');
   }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

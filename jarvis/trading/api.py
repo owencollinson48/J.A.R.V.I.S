@@ -10,6 +10,15 @@ def register(app,service,assistant=None):
     async def snapshot():
         return await asyncio.to_thread(service.snapshot)
 
+    @app.get('/api/trading/connection/report')
+    async def connection_report():
+        from ..store import now
+        status=service.desktop.public()
+        return {'schema_version':1,'generated_at':now(),'application':'TradingView Desktop',
+                'stage':status.get('stage','not_checked'),'connection':status,
+                'native_order_implementation':'unavailable','orders_enabled':False,
+                'note':'This read-only report contains observed controls and account data where readable. It performs no connection clicks or orders; screenshot metadata refers to the local authenticated image endpoint.'}
+
     @app.post('/api/trading/control')
     async def control(body:dict):
         if set(body)-{'action','mode','close_positions'}: raise ValueError('Unsupported trading control fields')

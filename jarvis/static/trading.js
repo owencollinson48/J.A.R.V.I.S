@@ -64,12 +64,34 @@
     }
     model.hydrated=true;
   }
+  function renderConnection(tv) {
+    const stages={application_not_found:'The installed application was not found.',desktop_unavailable:'Windows desktop access is unavailable.',accessibility_unavailable:'The app was found, but its controls could not be read.',paper_selection_required:'The app was found; select or connect the Paper Trading account.',account_data_unreadable:'The app was found, but its account values could not be read.',paper_verified:'Paper Trading selection was verified.',connection_error:'The connection check encountered an error.'};
+    const stage=tv.stage==='paper_verified' && tv.verified!==true?'The previous Paper Trading observation needs a fresh check.':stages[tv.stage] || (tv.application_visible?'The TradingView app was observed; Paper Trading is not yet verified.':'Run Connect TradingView desktop to inspect the installed application.');
+    $('#trading-connection-stage').textContent=stage+(tv.observed_at?' Last inspected '+when(tv.observed_at)+'.':'');
+    const diagnostics=tv.diagnostics || {};
+    function checks(target,values,empty) {
+      target.replaceChildren(...(Array.isArray(values)?values:[]).filter(value=>value && typeof value==='object').slice(0,40).map(value=>{
+        const status=['passed','failed'].includes(value.status)?value.status:'unknown';
+        return node('li',(status==='passed'?'✓ ':status==='failed'?'× ':'◇ ')+display(value.name)+(value.detail?' · '+String(value.detail).slice(0,1200):''),status);
+      }));
+      if(!target.children.length && empty)target.append(node('li',empty));
+    }
+    checks($('#trading-connection-checks'),diagnostics.checks,'No measured connection checks have been returned yet.');
+    checks($('#trading-connection-actions'),diagnostics.actions,'');
+    const controls=(Array.isArray(diagnostics.controls)?diagnostics.controls:[]).filter(value=>value && typeof value==='object').slice(0,200).map(value=>({name:String(value.name || '').slice(0,800),type:String(value.type || '').slice(0,80),...(value.text!==undefined?{text:String(value.text).slice(0,1200)}:{})}));
+    $('#trading-observed-controls').hidden=!controls.length;
+    $('#trading-observed-control-data').textContent=JSON.stringify(controls,null,2);
+    const imageID=tv.screenshot?.image_id,link=$('#trading-connection-screenshot');
+    link.hidden=typeof imageID!=='string' || !/^[a-f0-9]{32}$/i.test(imageID);
+    if(link.hidden)link.removeAttribute('href');else link.href='/api/screenshots/'+imageID;
+  }
   function render(snapshot) {
     model.snapshot=snapshot;const connection=snapshot.connection || {},tv=connection.tradingview || {},simulator=connection.adapter==='independent_paper';
     const verified=!simulator && tv.verified===true && tv.connected===true;
-    $('#trading-connection').textContent=simulator?'Independent paper simulator · separate ledger':verified?'TradingView desktop · Paper Trading verified':'TradingView desktop · not verified';
+    $('#trading-connection').textContent=simulator?'Independent paper simulator · separate ledger':verified?'TradingView desktop · Paper Trading verified':tv.application_visible?'TradingView desktop · app observed, Paper Trading not verified':'TradingView desktop · not verified';
     $('#trading-connection-led').classList.toggle('connected',verified);
     $('#trading-connection-detail').textContent=simulator?'Simulator fills and balances belong to JARVIS, separate from TradingView.':tv.reason || connection.reason || 'Connect the installed TradingView application and verify Paper Trading before submitting orders.';
+    renderConnection(tv);
     $('#trading-mode').textContent=snapshot.mode || 'OFF';
     $('#trading-last-updated').textContent='Updated '+new Date().toLocaleTimeString();
     $('#trading-suspension').textContent=(snapshot.emergency_stop?'Emergency stop is set. ':'')+(snapshot.suspension_reason || '');
@@ -177,6 +199,15 @@
       const result=await api('/journal?'+query);model.journal=result.trades || [];model.journalAnalytics=result;table($('#trading-journal'),[['Entry','entry_time',when],['Instrument','symbol'],['Direction',item=>item.direction || item.side],['Contracts','quantity',decimal],['Entry price',item=>item.entry_price || item.entry,decimal],['Exit','exit_price',decimal],['Net P/L','net_pnl',money],['Realised R',item=>item.realized_r ?? item.realised_r,decimal],['Exit reason','exit_reason']],model.journal,'No trades match these filters.',trade=>{$('#trading-trade-detail').textContent=JSON.stringify(trade,null,2);$('#trading-trade-detail').parentElement.open=true;});renderAnalytics();
     }catch(error){notify(error.message,true);}
   }
+  async function downloadConnectionReport(button) {
+    button.disabled=true;
+    try {
+      const report=await api('/connection/report'),blob=new Blob([JSON.stringify(report,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),link=node('a');
+      link.href=url;link.download='JARVIS-TradingView-connection.json';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+      notify('Connection report downloaded.');
+    } catch(error) { notify(error.message,true); }
+    finally { button.disabled=false; }
+  }
   async function exportReport(format,button) {
     button.disabled=true;try{const query=new URLSearchParams({dataset:$('#trading-journal-dataset').value,format,query:$('#trading-journal-query').value,...dateRange('trading-journal',true)});if(model.report?.id&&query.get('dataset')==='backtest')query.set('run_id',model.report.id);
       const response=await fetch('/api/trading/export?'+query,{credentials:'same-origin'});if(!response.ok){const result=await response.json();throw new Error(result.detail || 'Export failed.');}const url=URL.createObjectURL(await response.blob()),link=node('a');link.href=url;link.download='JARVIS-'+query.get('dataset')+'-journal.'+format;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);notify('Report exported.');
@@ -189,7 +220,8 @@
   $('#trading-reset').onclick=event=>run(()=>api('/control',{action:'reset_emergency'}),event.currentTarget);
   $('#trading-cancel-orders').onclick=event=>run(()=>api('/control',{action:'cancel_orders'}),event.currentTarget);
   $('#trading-close-positions').onclick=event=>run(()=>api('/control',{action:'close_positions'}),event.currentTarget);
-  $('#trading-connect').onclick=event=>run(()=>api('/control',{action:'connect'}),event.currentTarget);
+  $('#trading-connect').onclick=event=>run(async()=>{const result=await api('/control',{action:'connect'});return{...result,message:result.message || result.reason || 'Connection check completed.'};},event.currentTarget);
+  $('#trading-download-connection-report').onclick=event=>downloadConnectionReport(event.currentTarget);
   $('#trading-backend-save').onclick=event=>run(()=>api('/config',{execution_backend:$('#trading-backend').value},'PATCH'),event.currentTarget);
   $('#trading-config-form').onsubmit=event=>{event.preventDefault();const changes={};Object.entries(configFields).forEach(([key,id])=>changes[key]=Number($('#trading-'+id).value));changes.sessions=[];if($('#trading-session-london').checked)changes.sessions.push({name:'London',timezone:'Europe/London',open:'08:00',weekdays:[0,1,2,3,4]});if($('#trading-session-new-york').checked)changes.sessions.push({name:'New York',timezone:'America/New_York',open:'09:30',weekdays:[0,1,2,3,4]});run(async()=>{const result=await api('/config',changes,'PATCH');return{...result,message:'Configuration proposed. Activate its version explicitly in Strategy research.'};},event.submitter);};
   $('#trading-import-form').onsubmit=event=>{event.preventDefault();run(async()=>{const file=$('#trading-import-file').files[0];if(file&&file.size>10*1024*1024)throw new Error('Use a CSV smaller than 10 MB.');const csv=file?await file.text():$('#trading-import-csv').value;if(!csv.trim())throw new Error('Choose a CSV file or paste its contents.');return api('/data',{symbol:$('#trading-import-symbol').value,source:$('#trading-import-source').value,kind:$('#trading-import-kind').value,timeframe_minutes:Number($('#trading-import-timeframe').value),csv});},event.submitter);};

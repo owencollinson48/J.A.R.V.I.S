@@ -214,7 +214,11 @@ class TradingService:
             self.entry_stop.set()
             self._stop_generation+=1
         if cancel: cancel.check()
-        if action=='connect': return self.desktop.connect(cancel)
+        if action=='connect':
+            result=self.desktop.connect(cancel)
+            self.audit('desktop_connection_checked',{'stage':result.get('stage'),'verified':result.get('verified'),
+                'window_id':result.get('window_id'),'diagnostics':result.get('diagnostics',{})})
+            return result
         with self.store.lock:
             if cancel: cancel.check()
             state=self._state();config=self.config()
